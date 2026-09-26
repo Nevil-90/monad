@@ -17,7 +17,8 @@
     "deploy": "node --env-file-if-exists=.env scripts/deploy.js",
     "test:all": "npm run compile && npm test && npm run test:evm && npm run test:security",
     "start": "next start -p 3000",
-    "dev:app": "next dev -p 3000"
+    "dev:app": "next dev -p 3000",
+    "dev:testnet": "node scripts/dev.js --with-keeper"
   },
   "devDependencies": {
     "ganache": "^7.9.2",

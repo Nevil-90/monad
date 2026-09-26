@@ -357,6 +357,30 @@ async function main() {
   });
 
   // ---------------------------------------------------------------------------
+  // SEC-24: Idle markets burned keeper gas rolling empty rounds every minute
+  // ---------------------------------------------------------------------------
+  await section('SEC-24', async () => {
+    const m = await newMarket();
+    const r1 = await amm.rounds(m, 1n);
+    await warpTo(r1.lockTimestamp + 300n); // five idle minutes, no keeper transactions
+    await (await amm.connect(alice).betUp(m, 1n, { value: ethers.parseEther('2') })).wait();
+    const mk = await amm.markets(m);
+    check('SEC-24', mk.currentRoundId === 2n, 'A bet on an expired, empty round starts a fresh round');
+    check('SEC-24', Number((await amm.rounds(m, 1n)).status) === 4, 'The empty round is closed as cancelled (no funds in it)');
+    const r2 = await amm.rounds(m, 2n);
+    check('SEC-24', r2.totalUp === ethers.parseEther('2') && r2.lockTimestamp > r1.lockTimestamp + 300n,
+      'The bet lands in the new round, which has a full betting window');
+    check('SEC-24', await reverts(() => amm.connect(bob).betDown.staticCall(m, 1n, { value: ethers.parseEther('1') }), 'Round not open for bets'),
+      'A stale round id is not redirected');
+
+    // A round that has bets is never replaced: a late bettor cannot void it
+    await warpTo(r2.betCloseTimestamp + 1n);
+    check('SEC-24', await reverts(() => amm.connect(bob).betDown.staticCall(m, 2n, { value: ethers.parseEther('1') }), 'Betting window closed'),
+      'A late bet on a round that has bets is rejected, not turned into a new round');
+    check('SEC-24', Number((await amm.rounds(m, 2n)).status) === 1, 'The round with bets stays open for its keeper');
+  });
+
+  // ---------------------------------------------------------------------------
   // SEC-10: Private keys accepted as CLI arguments (leak to shell history / ps)
   // ---------------------------------------------------------------------------
   for (const f of ['scripts/keeper_bot.js', 'scripts/deploy.js']) {

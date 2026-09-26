@@ -387,6 +387,22 @@ contract MonadUpDownAMM is SignedPriceOracle {
         require(market.active, "Market inactive");
 
         Round storage round = rounds[marketId][roundId];
+
+        // Idle markets cost nothing: a current round whose betting window passed with no bets at all is
+        // replaced by a fresh round on the next bet, instead of a keeper rolling empty rounds every
+        // minute. No funds are involved (the old round's pool is zero).
+        if (
+            roundId == market.currentRoundId &&
+            round.status == RoundStatus.Open &&
+            round.totalPool == 0 &&
+            block.timestamp > round.betCloseTimestamp
+        ) {
+            round.status = RoundStatus.Cancelled;
+            emit RoundCancelled(marketId, roundId, "Idle round replaced by a new round");
+            roundId = _startRound(marketId);
+            round = rounds[marketId][roundId];
+        }
+
         require(round.status == RoundStatus.Open, "Round not open for bets");
         
         // Anti-frontrunning lock buffer

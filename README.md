@@ -48,6 +48,16 @@ Details and residual risks: [SECURITY_FIXES.md](SECURITY_FIXES.md) (SEC-01, 02, 
 | Keeper | `scripts/keeper_bot.js` | Captures reports as they are published; locks, settles and refunds rounds |
 | Local chain | `scripts/dev_chain.js` | Ganache with the contract deployed and simulated activity |
 
+## Live on Monad testnet
+
+`MonadUpDownAMM` is deployed at
+[`0x2d983986A906006Fa15479314E6F36cE30550b80`](https://testnet.monadexplorer.com/address/0x2d983986A906006Fa15479314E6F36cE30550b80)
+with BTC, ETH, SOL and MON markets. A first round was bet, locked and settled on live RedStone reports
+and the winner claimed ([settle tx](https://testnet.monadexplorer.com/tx/0x20ab4528a2224e3e6dc658e5f05f3ece41588760f974217a159d7e8d040cfce8)).
+
+Idle markets cost nothing: a round nobody bet in is replaced by the next bet, so the keeper only
+sends transactions for rounds that hold bets.
+
 ## Run it locally
 
 Requires Node 22.9+ (for `--env-file-if-exists`).
@@ -74,9 +84,9 @@ npm run dev
 npm run deploy -- --dry-run     # pre-flight: RPC, chain id, all 5 RedStone signers live, gas estimate
 npm run deploy -- --network testnet
 # put the printed NEXT_PUBLIC_CONTRACT_ADDRESS and NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK in .env
-npm run keeper -- --mode live --network testnet   # keep it running
-npm run relay                                     # keep it running
-npm run build && npm start
+npm run dev:testnet   # relay + keeper + app in one terminal (development)
+# production: run `npm run relay` and `npm run keeper -- --mode live --network testnet` as services,
+# then `npm run build && npm start`
 ```
 
 The keeper and the relay must run continuously: RedStone's free gateway does not serve past reports,

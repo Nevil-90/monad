@@ -3,7 +3,10 @@
  * One command for local development: starts the RedStone price relay and the Next.js dev server
  * together, with prefixed output. Ctrl+C stops both; if either exits, the other is stopped too.
  *
- * Usage: npm run dev
+ * Usage: npm run dev                 relay + app
+ *        npm run dev:testnet         relay + keeper (live, Monad testnet) + app; needs KEEPER_PRIVATE_KEY
+ *                                    and NEXT_PUBLIC_CONTRACT_ADDRESS in .env. The keeper only sends
+ *                                    transactions for rounds that have bets.
  */
 
 import { spawn } from 'child_process';
@@ -17,6 +20,9 @@ const procs = [
   { name: 'relay', color: 36, cmd: process.execPath, args: ['--env-file-if-exists=.env', 'scripts/price_relay.js'] },
   { name: 'app', color: 35, cmd: bin('next'), args: ['dev', '-p', process.env.PORT_APP || '3000'] }
 ];
+if (process.argv.includes('--with-keeper')) {
+  procs.push({ name: 'keeper', color: 33, cmd: process.execPath, args: ['--env-file-if-exists=.env', 'scripts/keeper_bot.js', '--mode', 'live', '--network', 'testnet'] });
+}
 
 let stopping = false;
 const children = procs.map(({ name, color, cmd, args }) => {

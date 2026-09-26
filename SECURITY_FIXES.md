@@ -48,6 +48,7 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-20 | Medium | Silent fallbacks replaced real data with invented or wrong values (see details) | ✅ Fixed | — (manual + script runs) | — |
 | SEC-21 | Medium | Free oracle gateway keeps no past reports: an uncaptured round could only refund after 2 h | ✅ Fixed | `[SEC-21]` | ✅ |
 | SEC-22 | High | Oracle signer set is owner-controlled: an instant swap would let the owner forge prices | ✅ Fixed | `[SEC-22]` | ✅ |
+| SEC-24 | Medium (ops) | Idle markets needed a keeper transaction every minute (~6 MON/hour for 4 markets) | ✅ Fixed | `[SEC-24]` | ✅ |
 | SEC-23 | High (legal) | RedStone's own contract library is BUSL-1.1; free production use of its data is unconfirmed | 🟡 Partial | — | — |
 
 ---
@@ -165,6 +166,11 @@ RedStone's EVM connector package ships its Solidity under **BUSL-1.1** (its pack
 - [ ] Get written confirmation from RedStone that production use of `redstone-primary-prod` via the public gateway is allowed, or agree terms.
 - [ ] Re-check the signer set before deploy (`src/oracle.js`; `npm run deploy -- --dry-run` verifies all 5 sign right now).
 
+### SEC-24: Idle markets drain the keeper (Medium, ops) ✅
+**Issue.** A round nobody bet in still had to be closed and a new one started every minute. Measured on Monad testnet: ~249k gas ≈ 0.025 MON per market per minute, about 6 MON/hour for 4 idle markets, with nobody playing.
+**Fix.** The first bet on an expired round that has **no** bets replaces it with a fresh round in the same transaction (`_placeBet`). The keeper sends nothing for empty rounds. A round that holds any bet is never replaced, so a late bettor cannot void it.
+**Test.** `[SEC-24]`: idle round replaced on the next bet and the bet lands in the new round; a stale round id is not redirected; a late bet on a round with bets is rejected and the round stays open. Verified on testnet 2026-09-26 (BTC round #1 → #2).
+
 ---
 
 ## Breaking changes introduced by these fixes
@@ -183,6 +189,7 @@ The contract is not upgradeable. **These fixes require a fresh deployment**, the
 
 | Date | ID(s) | Change |
 |---|---|---|
+| 2026-09-26 | SEC-24 | Idle rounds replaced on the next bet; keeper skips empty rounds. Deployed to Monad testnet at `0x2d983986A906006Fa15479314E6F36cE30550b80` and ran a full round with live RedStone reports (lock, settle, claim). Security 58/58, mutations 10/10. |
 | 2026-09-26 | SEC-01, 02, 21, 22, 23 | Settlement moved from Pyth (API key required since 2026-08-26) to RedStone's free signed reports, verified by our own `SignedPriceOracle.sol`. SEC-01/02 re-proven on the new oracle; added SEC-21/22 with tests and mutations. Suites: invariants 75/75, EVM 42/42 (incl. real RedStone packages on-chain), security 52/52, mutations 9/9 caught. |
 | 2026-09-26 | SEC-19, SEC-20 | Removed silent fallbacks across keeper, deploy, config and UI; bets blocked when the network switch fails. All suites pass (80/80, 33/33, 39/39; 6/6 mutations caught). |
 | 2026-09-26 | — | UI redesign (Horizon). Contract additions for the UI: `totalWinnings`, per-round `upBettors` / `downBettors`. All suites pass (EVM 33/33, security 39/39). |

@@ -107,6 +107,10 @@ class Keeper {
     const now = Math.floor(Date.now() / 1000);
     const key = `${market.feed}:${rId}`;
 
+    // Nobody bet: nothing to lock, settle or refund. The next bet replaces the round on-chain (SEC-24),
+    // so idle markets cost the keeper nothing.
+    if (round.totalPool === 0n) return;
+
     // A round nobody could resolve: refund it so the market moves on (anyone may call this)
     if ((status === 1 || status === 2) && now > Number(round.closeTimestamp) + this.emergencyTimeout) {
       return this.send('REFUND', 'emergencyRefund', market, rId);

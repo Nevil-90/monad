@@ -53,6 +53,13 @@ const MUTATIONS = [
     expect: ['SEC-21']
   },
   {
+    id: 'SEC-24',
+    name: 'Replace any expired round on a late bet, even one holding bets',
+    from: '            round.totalPool == 0 &&\n',
+    to: '',
+    expect: ['SEC-24']
+  },
+  {
     id: 'SEC-03',
     name: 'Push keeper bounty to the locker with an unbounded call',
     from: 'keeperRewards[locker] += split;',
