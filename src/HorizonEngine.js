@@ -330,7 +330,11 @@ export class HorizonEngine {
     const spacing = isNarrow ? 8 : 10;
     const pps = spacing / this.tf;
     const plotW = F.x1 - F.x0;
-    const nowX = F.x1 - clamp(duration * pps + 24, spacing * 6, plotW * 0.4);
+    // Room to the right of "now" for the round ahead: up to its result time, so the STRIKE and RESULT
+    // markers are on screen
+    const ahead = this.liveGates && ['preview', 'open', 'closed', 'locked'].includes(this.liveGates.phase)
+      ? Math.max(0, (this.liveGates.closeAt - now) / 1000) : duration;
+    const nowX = F.x1 - clamp(ahead * pps + 48, spacing * 6, plotW * 0.45);
     const xAt = (t) => nowX - ((now - t) / 1000) * pps;
     const tAt = (x) => now + ((x - nowX) / pps) * 1000;
     const visibleFrom = tAt(F.x0 - spacing);
@@ -453,7 +457,10 @@ export class HorizonEngine {
     ctx.lineTo(W, horizonY);
     ctx.stroke();
     ctx.restore();
-    if (!this.strike) {
+    // The STRIKE marker on the time axis says when the strike sets; this label is only for when no round
+    // timeline is known yet
+    const timeline = this.liveGates && ['preview', 'open', 'closed'].includes(this.liveGates.phase);
+    if (!this.strike && !timeline) {
       ctx.font = `600 10px ${FONT}`;
       ctx.textAlign = 'right';
       ctx.fillStyle = rgba(COLORS.horizon, 0.5);
@@ -583,6 +590,15 @@ export class HorizonEngine {
       const x = Math.round(xAt(c.t + tfMs / 2)) + 0.5;
       if (x < F.x0 - body || x > F.x1) continue;
       const color = c.c > c.o ? COLORS.sun : c.c < c.o ? COLORS.tide : COLORS.horizon;
+      if (c.h === c.l && i !== candles.length - 1) {
+        // No trade in this interval: a thin level line across the whole slot, so quiet stretches read
+        // as one continuous flat price instead of a row of dashes
+        ctx.strokeStyle = rgba(color, 0.5);
+        ctx.lineWidth = 1;
+        const y = Math.round(yAt(c.c)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(x - spacing / 2, y); ctx.lineTo(x + spacing / 2, y); ctx.stroke();
+        continue;
+      }
       ctx.strokeStyle = rgba(color, 0.95);
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(x, yAt(c.h)); ctx.lineTo(x, yAt(c.l)); ctx.stroke();
@@ -645,35 +661,63 @@ export class HorizonEngine {
   }
 
   /**
-   * One marker: the next thing that happens in the round, in plain words (the round console has the
-   * full timeline). Several dashed lines with their own countdowns were hard to read and overlapped.
+   * The round on the time axis: a STRIKE marker (when the price is locked), a RESULT marker (when the
+   * round is decided) and the shaded window between them, whose price movement decides the round.
+   * 'preview' (no round running) shows the round a bet placed now would start, dimmer. The result
+   * label drops a line when it would touch the strike label, so they never overlap.
    */
   drawLiveGates(ctx, F, xAt, now) {
-    const { betCloseAt, lockAt, closeAt, phase } = this.liveGates;
+    const { lockAt, closeAt, phase } = this.liveGates;
+    if (!['preview', 'open', 'closed', 'locked', 'settling', 'confirming'].includes(phase)) return;
     const clock = (t) => {
       const s = Math.max(0, Math.ceil((t - now) / 1000));
       return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
     };
-    const next = {
-      open: { t: betCloseAt, label: `BETTING CLOSES ${clock(betCloseAt)}`, alpha: 0.35 },
-      closed: { t: lockAt, label: `PRICE LOCKS ${clock(lockAt)}`, alpha: 0.45 },
-      locked: { t: closeAt, label: `RESULT IN ${clock(closeAt)}`, alpha: 0.55 },
-      settling: { t: closeAt, label: 'RESULT COMING', alpha: 0.55 },
-      confirming: { t: closeAt, label: 'CONFIRMING PRICE', alpha: 0.55 }
-    }[phase];
-    if (!next) return;
-    const x = xAt(next.t);
-    if (x < F.x0 || x > F.x1) return;
+    const dim = phase === 'preview' ? 0.6 : 1;
+    const running = phase === 'locked';
+    const ending = phase === 'settling' || phase === 'confirming';
+    const strike = { t: lockAt, label: lockAt > now ? `STRIKE ${clock(lockAt)}` : 'STRIKE', alpha: (lockAt > now ? 0.45 : 0.3) * dim };
+    const result = {
+      t: closeAt,
+      label: phase === 'confirming' ? 'CONFIRMING PRICE' : ending ? 'RESULT COMING' : `RESULT ${clock(closeAt)}`,
+      alpha: (running || ending ? 0.7 : 0.45) * dim
+    };
+    const xs = xAt(strike.t);
+    const xr = xAt(result.t);
     ctx.save();
-    ctx.strokeStyle = rgba(COLORS.ink, next.alpha);
-    ctx.setLineDash([3, 5]);
-    ctx.beginPath(); ctx.moveTo(x, F.plotTop); ctx.lineTo(x, F.volBottom); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.font = `600 9px ${FONT}`;
-    const w = ctx.measureText(next.label).width;
+    // The deciding window
+    const left = Math.max(F.x0, xs);
+    const right = Math.min(F.x1, xr);
+    if (right > left) {
+      ctx.fillStyle = rgba(COLORS.ink, (running ? 0.05 : 0.03) * dim);
+      ctx.fillRect(left, F.plotTop, right - left, F.volBottom - F.plotTop);
+    }
+    ctx.font = `700 10px ${FONT}`;
     ctx.textAlign = 'center';
-    ctx.fillStyle = rgba(COLORS.ink, Math.min(1, next.alpha + 0.4));
-    ctx.fillText(next.label, Math.min(F.x1 - w / 2, Math.max(F.x0 + w / 2, x)), F.plotTop - 6);
+    const line = (x, alpha) => {
+      ctx.strokeStyle = rgba(COLORS.ink, alpha);
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath(); ctx.moveTo(x, F.plotTop); ctx.lineTo(x, F.volBottom); ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    const place = (x, text) => {
+      const w = ctx.measureText(text).width;
+      return { x: Math.min(F.x1 - w / 2, Math.max(F.x0 + w / 2, x)), w };
+    };
+    let strikeLabel = null;
+    if (xs >= F.x0 && xs <= F.x1) {
+      line(xs, strike.alpha);
+      strikeLabel = place(xs, strike.label);
+      ctx.fillStyle = rgba(COLORS.horizon, Math.min(1, strike.alpha + 0.5));
+      ctx.fillText(strike.label, strikeLabel.x, F.plotTop - 6);
+    }
+    if (xr >= F.x0 && xr <= F.x1) {
+      line(xr, result.alpha);
+      const r = place(xr, result.label);
+      const clash = strikeLabel && Math.abs(r.x - strikeLabel.x) < (r.w + strikeLabel.w) / 2 + 8;
+      ctx.fillStyle = rgba(COLORS.ink, Math.min(1, result.alpha + 0.5));
+      ctx.fillText(result.label, r.x, F.plotTop - 6 + (clash ? 13 : 0));
+    }
     ctx.restore();
   }
 

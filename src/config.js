@@ -120,7 +120,7 @@ export const TYPICAL_GAS = {
 // marketId = keccak256(abi.encodePacked(bytes32(feed), symbol, roundDuration)).
 export const SUPPORTED_MARKETS = {
   BTC: {
-    marketId: '0xc432785f59f7efa251b3c5ba521def427f61a39fef626fd0f6376da33735fd9e',
+    marketId: '0x59294bc06269f63b60b63ee06667680628d5671d515196bc7074fe72e621fc1a',
     symbol: 'BTC/USD',
     name: 'Bitcoin',
     feed: 'BTC',
@@ -128,14 +128,14 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'btcusdt@ticker',
     binanceTradeStream: 'btcusdt@trade',
     decimals: 2,
-    roundDuration: 60,
+    roundDuration: 30,
     minBet: 0.1,
     maxBet: 5000.0,
     icon: '₿',
     accentColor: '#f7931a'
   },
   ETH: {
-    marketId: '0x9627768f48a0fac5f23a0a1e88ede1c008911faff20be79db7672065044b3498',
+    marketId: '0x136f06ff19094248bad10faa0a5a77934229a8919cb38ea96a2553208a185ed5',
     symbol: 'ETH/USD',
     name: 'Ethereum',
     feed: 'ETH',
@@ -143,14 +143,14 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'ethusdt@ticker',
     binanceTradeStream: 'ethusdt@trade',
     decimals: 2,
-    roundDuration: 60,
+    roundDuration: 30,
     minBet: 0.1,
     maxBet: 5000.0,
     icon: 'Ξ',
     accentColor: '#627eea'
   },
   SOL: {
-    marketId: '0xdeb001efbeffa0b95446095f5c1ba806a786b8e044f9ca47bd70eac4b0b7b252',
+    marketId: '0x4b635dc0844531fe1e553dc9fc420ba762844708cb36820ae0eff7fbf0df7b08',
     symbol: 'SOL/USD',
     name: 'Solana',
     feed: 'SOL',
@@ -158,14 +158,14 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'solusdt@ticker',
     binanceTradeStream: 'solusdt@trade',
     decimals: 2,
-    roundDuration: 60,
+    roundDuration: 30,
     minBet: 0.1,
     maxBet: 5000.0,
     icon: '◎',
     accentColor: '#14f195'
   },
   MON: {
-    marketId: '0xcdd64f46add8aeaf07180ed1a3dc00a1295129d708b9a63b4a40dec464feb487',
+    marketId: '0x113c7cb008694d03e98bd99015925fa7918673291f92169097a9a8eac1c5e3f1',
     symbol: 'MON/USD',
     name: 'Monad Native',
     feed: 'MON',
@@ -173,7 +173,7 @@ export const SUPPORTED_MARKETS = {
     binanceStream: null,
     binanceTradeStream: null,
     decimals: 4,
-    roundDuration: 60,
+    roundDuration: 30,
     minBet: 1.0,
     maxBet: 25000.0,
     icon: 'M',

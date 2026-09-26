@@ -593,6 +593,14 @@ button:disabled { cursor: not-allowed; }
 .phase-label { font-weight: 700; color: var(--ink); }
 .console.locked .phase-label { color: var(--horizon); }
 .status-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3); }
+/* Each status item stays on one line; at medium widths the row drops the chart-button labels and the
+   feed latency so it fits on one line instead of wrapping every item */
+.console-status > * { white-space: nowrap; }
+@media (max-width: 1180px) {
+  .console-status { gap: 8px; }
+  .console-status .chart-btn span { display: none; }
+  .console-status .feed, .console-status .status-sep:last-of-type { display: none; }
+}
 .chart-toggle { display: inline-flex; padding: 2px; border-radius: 999px; border: 1px solid var(--line); }
 .chart-btn { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--ink-3); }
 .chart-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }

@@ -502,8 +502,9 @@ export function startApp() {
     const share = stake > 0 ? ((betFee + claimFee) / stake) * 100 : null;
     node.classList.remove('hidden');
     node.classList.toggle('warn', share !== null && share > 5);
-    node.textContent = `Network fee ≈ ${betFee.toFixed(4)} MON to bet, ≈ ${claimFee.toFixed(4)} to claim`
-      + (share !== null && share > 5 ? ` · about ${share.toFixed(0)}% of this stake, not refundable` : '');
+    node.textContent = `Network fees ≈ ${betFee.toFixed(3)} + ${claimFee.toFixed(3)} MON (bet + claim)`
+      + (share !== null && share > 5 ? ` · ${share.toFixed(0)}% of stake` : '');
+    node.title = 'Paid to the Monad network to place and to claim a bet. Not refundable, even if the round is.';
   }
 
   function paintOdds() {
@@ -922,7 +923,8 @@ export function startApp() {
   el.stake.addEventListener('input', paintOdds);
   document.querySelectorAll('.chip[data-add]').forEach((chip) => {
     chip.addEventListener('click', () => {
-      el.stake.value = (parseFloat(el.stake.value) || 0) + parseFloat(chip.dataset.add);
+      el.stake.value = String(Math.round(((parseFloat(el.stake.value) || 0) + parseFloat(chip.dataset.add)) * 100) / 100);
+      stakeEdited = true;
       paintOdds();
     });
   });
@@ -1143,7 +1145,7 @@ export function startApp() {
     const span = st.phase === 'open' ? (st.betCloseAt - (st.lockAt - m.roundDuration * 1000)) / 1000 : m.roundDuration;
     el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - (left === null ? 0 : Math.min(1, left / Math.max(1, span))))}`;
 
-    engine.setLiveRound({ ...st, duration: m.roundDuration });
+    engine.setLiveRound(preview ? { ...st, ...preview, phase: 'preview', duration: m.roundDuration } : { ...st, duration: m.roundDuration });
     if ((st.lockPrice || null) !== engine.strike) engine.setStrike(st.lockPrice);
     if (roundChanged) engine.setUserPositions([]);
     paintReadout(m, m.price);

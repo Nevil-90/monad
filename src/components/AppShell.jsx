@@ -161,9 +161,9 @@ export default function AppShell() {
                   <span className="stake-unit">MON</span>
                 </div>
                 <div className="stake-chips">
-                  <button className="chip" data-add="10">+10</button>
-                  <button className="chip" data-add="50">+50</button>
-                  <button className="chip" data-add="100">+100</button>
+                  <button className="chip" data-add="0.5">+0.5</button>
+                  <button className="chip" data-add="1">+1</button>
+                  <button className="chip" data-add="5">+5</button>
                   <button className="chip" id="stake-max">Max</button>
                   <button className="chip" id="stake-clear" aria-label="Clear stake">×</button>
                 </div>
@@ -351,7 +351,7 @@ export default function AppShell() {
             <ol className="guide">
               <li>
                 <span className="guide-n num">1</span>
-                <div><h3>Pick a side</h3><p>Every round is one minute. Stake on <b className="rise">Rise</b> if you think the price ends above the strike, or <b className="fall">Fall</b> if below.</p></div>
+                <div><h3>Pick a side</h3><p>Every round is 30 seconds: betting, then the strike, then the result 30 seconds later. Stake on <b className="rise">Rise</b> if you think the price ends above the strike, or <b className="fall">Fall</b> if below.</p></div>
               </li>
               <li>
                 <span className="guide-n num">2</span>

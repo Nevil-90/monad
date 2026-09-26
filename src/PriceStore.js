@@ -11,6 +11,8 @@ import { API_CONFIG } from './config.js';
 const MAX_1S = 3600;
 const MAX_1M = 1000;
 const MAX_FILL = 720; // flat candles per gap: 1 hour of 5 s candles
+const TRADE_HISTORY_MS = 25 * 60e3; // what the 15s view shows
+const MAX_TRADE_PAGES = 25;
 
 export class PriceStore {
   constructor() {
@@ -56,6 +58,11 @@ export class PriceStore {
         this.bars1m = m1;
         this.bars1s = this.merge(this.bars1s, live.s);
         this.bars1m = this.merge(this.bars1m, live.m);
+        // The 5s and 15s views are built from trades; 1000 trades cover only minutes on busy markets.
+        // Load older pages in the background until the 15s view is covered, so every timeframe shows
+        // its full window (bounded, one-off; not polling)
+        const oldestId = trades.length ? Math.min(...trades.map((t) => t.trade_id)) : null;
+        if (oldestId !== null) this.backfillTrades(base, oldestId, token);
       } catch (err) {
         console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
       }
@@ -82,6 +89,29 @@ export class PriceStore {
     } catch (err) {
       // The chart then starts empty and fills from live ticks; nothing is filled in
       console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
+    }
+  }
+
+  async backfillTrades(base, beforeId, token) {
+    const want = Date.now() - TRADE_HISTORY_MS;
+    for (let page = 0; page < MAX_TRADE_PAGES; page++) {
+      if (token !== this.loadToken) return;
+      if (this.bars1s.length && this.bars1s[0].t <= want) return;
+      let trades;
+      try {
+        const res = await fetch(`${base}/trades?limit=1000&after=${beforeId}`, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) return;
+        trades = await res.json();
+      } catch (_) {
+        return; // the views keep what they have
+      }
+      if (token !== this.loadToken || !trades.length) return;
+      const older = [];
+      for (const tr of [...trades].reverse()) this.update(older, 1000, parseFloat(tr.price), parseFloat(tr.size) || 0, Date.parse(tr.time), MAX_1S);
+      this.bars1s = this.merge(older, this.bars1s);
+      if (this.bars1s.length > MAX_1S) this.bars1s.splice(0, this.bars1s.length - MAX_1S);
+      beforeId = Math.min(...trades.map((t) => t.trade_id));
+      await new Promise((r) => setTimeout(r, 120)); // stay well under Coinbase's public rate limit
     }
   }
 
