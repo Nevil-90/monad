@@ -5,8 +5,11 @@ Tracks every security finding for `MonadUpDownAMM`: what was wrong, what changed
 ## How to verify
 
 ```bash
-npm run test:all        # compile + invariants + EVM integration + security regressions
+npm run test:all        # compile + app logic + EVM integration + security regressions
 npm run test:mutation   # re-injects each fixed bug and confirms the regression suite catches it
+npm run test:fuzz       # randomized stateful test: solvency, exact payouts, no refund-then-settle (SEC-17)
+npm run test:wallets    # testnet: 5 real wallets play 3 markets, payouts checked to the wei (needs the keeper)
+npm run test:challenge  # testnet: a dishonest late report is replaced by the keeper (SEC-28; keeper must be stopped)
 ```
 
 - `test/security_regressions.test.js` prints one `[PASS]/[FAIL] [SEC-xx]` line per check. **Any `[FAIL] [SEC-xx]` means that bug has come back.** Set its status to `Regressed` below and add a history entry.
@@ -36,14 +39,14 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-08 | Medium | Market spoofing: any feed can be listed under any name/symbol | 🟡 Partial | `[SEC-08]` | — |
 | SEC-09 | Critical (latent) | Re-creating a deactivated market would reset its round counter over live storage | ✅ Fixed | `[SEC-09]` | ✅ |
 | SEC-10 | Medium | Private keys accepted as CLI args (leak to shell history / `ps`) | ✅ Fixed | `[SEC-10]` | — (static check) |
-| SEC-11 | Medium | Keeper economics: bounty often below gas on small pools | ⬜ Open | — | — |
+| SEC-11 | Medium | Keeper economics: bounty often below gas on small pools; minBet far below network fees | 🟡 Partial | deploy pre-flight | — |
 | SEC-12 | Info | Rounding dust (< 1 wei per winning claim) stays in the contract | ➖ Won't fix | — | — |
 | SEC-13 | Info | "AntiScrapeShield" / "CircuitBreaker" are browser-only, not security controls | ➖ Won't fix | — | — |
-| SEC-14 | Medium | JS simulation scripts model the old contract, not the fixed one | ⬜ Open | — | — |
+| SEC-14 | Medium | JS simulation scripts model the old contract, not the fixed one | ✅ Fixed | — (scripts removed) | — |
 | SEC-15 | Medium | Market-hours feeds (equities/FX) have no price outside hours, so rounds stall until emergency timeout | ⬜ Open | — | — |
-| SEC-16 | High (ops) | Owner is a single EOA; no timelock | ⬜ Open | — | — |
-| SEC-17 | High (process) | No external audit; no Foundry fuzz/invariant tests | ⬜ Open | — | — |
-| SEC-18 | Low | Settle costs ~505k gas (next-round storage writes); keeper used a fixed 350k limit | 🟡 Partial | — | — |
+| SEC-16 | High (ops) | Owner is a single EOA; no timelock | 🟡 Partial | `[SEC-16]` | — |
+| SEC-17 | High (process) | No external audit; no fuzz/invariant tests | 🟡 Partial | `test:fuzz` | — |
+| SEC-18 | Low | Settle costs ~505k gas (next-round storage writes); keeper used a fixed 350k limit | ✅ Fixed | `[SEC-25]` | — |
 | SEC-19 | Medium | Bet sent even when switching the wallet to Monad failed (tx went to whatever chain the wallet was on) | ✅ Fixed | — (manual, browser) | — |
 | SEC-20 | Medium | Silent fallbacks replaced real data with invented or wrong values (see details) | ✅ Fixed | — (manual + script runs) | — |
 | SEC-21 | Medium | Free oracle gateway keeps no past reports: an uncaptured round could only refund after 2 h | ✅ Fixed | `[SEC-21]` | ✅ |
@@ -52,7 +55,8 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-25 | Medium (cost) | Monad charges the full gas LIMIT: +20%/+30% margins and a 10-slot Round struct overcharged every user and the keeper | ✅ Fixed | `[SEC-25]` (gas budgets) | — |
 | SEC-26 | Medium | "100% refund" ignored network fees, and refunds depended on someone else's transaction | ✅ Fixed | `[SEC-26]` | ✅ |
 | SEC-27 | Medium (liveness) | Requiring all 5 oracle signatures left contested rounds unsettleable when one node skipped a report | ✅ Fixed | EVM `4-of-5` checks | via SEC-02 |
-| SEC-28 | High (liveness) | Free gateway serves only the latest report through a rate-limited CDN: ~12% of 10 s timestamps are never observable, so their rounds can only be refunded | ⬜ Open | multi-wallet test | — |
+| SEC-28 | High (liveness) | Free gateway serves only the latest report through a rate-limited CDN: ~12% of 10 s timestamps are never observable, so their rounds can only be refunded | ✅ Fixed | `[SEC-28]`, `test:challenge` | ✅ |
+| SEC-29 | Critical | A timed-out round was refundable and still settleable: refunded stakes were paid again to winners, out of other rounds' money; the owner could also move the timeout of in-flight rounds | ✅ Fixed | `[SEC-29]`, `test:fuzz` | ✅ |
 | SEC-23 | High (legal) | RedStone's own contract library is BUSL-1.1; free production use of its data is unconfirmed | 🟡 Partial | — | — |
 
 ---
@@ -112,13 +116,11 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 **Fix.** `keeper_bot.js` and `deploy.js` read keys only from `KEEPER_PRIVATE_KEY` / `DEPLOYER_PRIVATE_KEY`. Passing `--private-key` now exits with an error.
 **Test.** `[SEC-10]`: static source check.
 
-### SEC-11: Keeper economics (Medium) ⬜
-Measured 2026-09-26 at 102 gwei, after SEC-25: a contested round costs the keeper ~0.048 MON (lock 0.013 + settle 0.036); its reward is 0.1% of the pool, so it breaks even only at ~48 MON per round. The treasury's 1.3% covers that at ~3.7 MON per round, so the protocol as a whole pays its own keeping above that pool size. One-sided rounds now cost the keeper nothing (SEC-26).
-- [ ] Decide: operator-run keeper funded from treasury, and/or a higher keeper share.
-- [ ] Set `minBet` so fees are a small share of a stake (e.g. ≥ 0.5 MON at current gas).
-
-The keeper earns 0.1% of the pool. On small pools that's below gas + Pyth fee, and uncontested rounds pay nothing. Only the team will keep keepers running.
-- [ ] Decide: minimum bounty floor, subsidy from treasury, or longer rounds / fewer markets.
+### SEC-11: Keeper economics (Medium) 🟡
+Measured 2026-09-26 at 102 gwei: a contested round costs the keeper ~0.05 MON (lock 0.019 + settle 0.031–0.042); its reward is 0.1% of the pool, so it breaks even only at ~50 MON per round. The whole 1.5% fee covers keeping at pools of ~3.5 MON and up. One-sided and empty rounds cost the keeper nothing (SEC-24/26).
+- [x] `minBet` is set at deploy from the live gas price so network fees to bet and claim are at most 5% of the smallest bet (0.42 MON at 102 gwei). The deploy pre-flight prints it; the owner re-tunes it with `setProtocolParameters` as gas moves.
+- [x] Decision: the operator runs the keeper and funds it from treasury fees. The keeper reports gas spent, rewards claimed and net result in its log and on `/health`, and warns below 1 MON.
+- [ ] Business decision left to the operator: a higher keeper share, or a treasury subsidy schedule, once real volumes are known.
 
 ### SEC-12: Rounding dust (Info) ➖
 Payouts round down, leaving < 1 wei per winning claim in the contract. Tracking it would need a global liabilities counter written on every bet, which serializes bets under Monad's parallel execution. The amount is economically irrelevant.
@@ -126,20 +128,23 @@ Payouts round down, leaving < 1 wei per winning claim in the contract. Tracking 
 ### SEC-13: Client-side "security" modules (Info) ➖
 `src/AntiScrapeShield.js` and `src/CircuitBreaker.js` run in the browser, and anyone can call the contract directly. Treat them as UX only; never rely on them for protection. The UI redesign removed the claims that overstated them ("80/80 SECURE", "DEFENSE ARMED") and the honeypot element with its fake "admin key" text.
 
-### SEC-14: Stale simulation models (Medium) ⬜
-`test/amm_invariants.test.js` and `scripts/*_100k*.js`, `scripts/adversarial_deep_audit.js` etc. model the old JS logic (e.g. `MAX_LOCK_DELAY` cancels). They still pass but no longer describe the contract.
-- [ ] Update or retire them; rely on EVM-level tests.
+### SEC-14: Stale simulation models (Medium) ✅
+Retired: the JS models of the old contract are gone; `test/invariant_fuzz.test.js` (SEC-17) and the EVM suites test the real compiled contract.
+
 
 ### SEC-15: Market-hours feeds (Medium) ⬜
 For equity/FX feeds there is no Pyth price outside trading hours, so rounds can't lock or settle and wait for `emergencyTimeout` (≥ 30 min).
 - [ ] Restrict `createMarket` to 24/7 feeds (allowlist), or add a market schedule.
 
-### SEC-16: Admin key (High, ops) ⬜
-- [ ] Transfer ownership to a multisig (e.g. Safe) behind a timelock right after deploy, using `transferOwnership` + `acceptOwnership`.
+### SEC-16: Admin key (High, ops) 🟡
+**What the owner can do:** change fees (≤ 10%) and timing parameters, pause new bets and markets, deactivate or verify markets, withdraw treasury fees, and propose an oracle signer change (applies after 2 days, SEC-22).
+**What it cannot do:** touch pool money. Fees, timing and expiry are snapshotted per round, pause never blocks lock, settle, refunds or claims, and withdrawals only take accrued fees. `[SEC-16]` uses every owner power at once mid-round and checks the winner is still paid in full at the round's own 1.5%.
+- [x] `npm run transfer-owner -- 0xSAFE` hands ownership to a Safe: refuses a plain wallet or a 1-of-n Safe, starts the two-step transfer and prints the `acceptOwnership()` transaction for the Safe's signers.
+- [ ] Operator: create the Safe (2 of 3 or more, keys on separate devices) and run the handover right after the mainnet deploy.
 
-### SEC-17: Audit & fuzzing (High, process) ⬜
-- [ ] Port the regression suite to Foundry and add fuzz/invariant tests (solvency: balance ≥ unclaimed payouts + fees + bounties).
-- [ ] External audit before mainnet.
+### SEC-17: Audit & fuzzing (High, process) 🟡
+- [x] `test/invariant_fuzz.test.js` (`npm run test:fuzz`): random players, keepers and owner actions against the compiled contract (bets, whole rounds, pinned / late / too-late reports with random 4- or 5-signer sets, ties, challenges, finalize, emergency refunds, claims, batch claims, fee and parameter changes, pause, withdrawals). After every step: balance ≥ everything owed; balance − owed ≤ 1 wei per winning bet; every payout equals the formula; a round anyone was refunded from never settles. Seeds 1, 2, 3, 7, 11 and 20260926 all hold (6–16 settled rounds per run); at the end every account withdraws and at most a few wei of rounding dust remain.
+- [ ] External audit before mainnet (needs a budget and an auditor: the operator's call).
 
 ### SEC-18: Settle gas cost (Low) 🟡
 Settle is ~505k gas because it also writes the next round's storage. The keeper previously used a fixed 350k limit, which would have failed; it now uses `estimateGas × 1.3`.
@@ -188,13 +193,22 @@ Failures used to be hidden behind substitute values. Each one now fails visibly 
 **Trade-off.** With all 5 reports available, the submitter can choose which 4 to send. The median of 4 is the mean of the middle two, so the choice moves the price at most within the spread between the 2nd and 4th node values; in captured data the nodes' values are identical or differ by cents. A round decided by less than that spread is effectively a tie.
 **Test.** `test/contract_evm.test.js`: with real captured packages, a 4-of-5 contract rejects 3 signatures and settles with 4 at their median. `[SEC-02]` still proves a chosen 3-of-5 subset is rejected.
 
-### SEC-28: Unobservable oracle reports (High, liveness) ⬜
-**Found** by the multi-wallet test on testnet (2026-09-26): BTC round 3 locked but could not settle; neither the keeper's nor the relay's archive ever saw a report for its close timestamp (1790431040), while the reports 10 s before and after were complete. Measured at 5 polls/s: most reports arrive ~12 s after their timestamp and stay "latest" ~10 s, but some arrive ~22 s late and are replaced after 0.3 s. The gateway sits behind CloudFront with a per-IP rate limit (5 req/s from one IP got a 403 block), so faster polling is not an option. Relay archive over a short window: 1 of 8 timestamps missing on all four feeds at once (≈12%). Each round needs two pinned timestamps, so roughly 1 in 5 contested rounds would end refunded.
-**Current behaviour (safe):** such a round is refundable in full after the 10-minute timeout, directly by each bettor (SEC-26). No funds are at risk, but players lose network fees and time.
-**Options (decision needed):**
-- [ ] A. Free: accept the earliest report at or after the pinned time within a short window, with a challenge period in which anyone can replace it with an earlier valid report (final price = earliest report anyone captured). Removes most refunds; adds ~1 min to payouts and contract complexity.
-- [ ] B. Paid: Pyth with an API key (fetch by timestamp, sub-second updates). The original contract (commit dc67457) was built for it.
-- [x] Mitigated: archive backs off on 403/429 so a block clears instead of being prolonged.
+### SEC-28: Unobservable oracle reports (High, liveness) ✅
+**Found** by the multi-wallet test on testnet (2026-09-26): BTC round 3 could not settle; neither archive (keeper, relay) ever saw the report for its close time (1790431040). Gateway 1 serves only the latest report set, and some sets are replaced before a 2 s poll sees them (~12% of timestamps), so ~1 in 5 contested rounds would have been refunded.
+**Root cause:** the data was never missing. RedStone's gateway 2 serves any 10 s report of the last 24 h by exact timestamp (`/v2/data-packages/historical/redstone-primary-prod/{ms}`, free, no key); the "missing" BTC report and the ETH set that looked short of a signer (SEC-27) are both there, complete with all 5 signatures. Measured: a report set is complete ~1.5–2 s after its timestamp.
+**Fix (three layers):**
+1. The keeper and relay fetch the report for a round's exact time from that history (`fetchReportsAt`), at the moment it is published, instead of trying to catch it live. Nothing polls the gateway.
+2. Lock and close times are aligned to the 10 s report grid, so the settling report is the one signed at the close second.
+3. Backstop for a gateway outage: if the pinned report cannot be found, a report up to `maxReportDelay` (30 s, half the round at most) later is accepted **provisionally**; for `CHALLENGE_PERIOD` (60 s) anyone can replace it with an earlier valid report (and takes the bounty); `finalizeRound` settles after that. The final price is the earliest report anyone can show. The pinned report settles at once.
+**Measured on testnet after the fix:** lock and settle confirmed 4.7–5.3 s after the lock/close time; the browser verifies the signed close report itself and shows the result 2.6 s after close ("confirming on-chain"), then "Settled on-chain" at ~4.5 s.
+**Test.** `[SEC-28]` (late lock/close accepted only provisionally, earlier replaces later, no later replacement, no settle before the challenge period ends, finalize pays the bounty, lock and close on the grid); `[SEC-02]` (too late / off-grid reports rejected; a later favourable close is replaced by the pinned one). `npm run test:challenge` plays a dishonest keeper on testnet with real RedStone reports: the keeper replaced both late reports with the pinned ones (4/4). Mutations: settle without the challenge period, replace with a later report, widen the window: all caught.
+**Residual.** If no one can produce the pinned report (gateway history down for the whole window), a party that privately captured it can choose to reveal it or not within the challenge period; the price then comes from the earliest report shown. With the history endpoint this needs the gateway to be down, and the round still refunds after expiry if no report at all is available.
+
+### SEC-29: Refund, then settle (Critical) ✅
+**Bug (found 2026-09-26 while reviewing SEC-28).** `_isRefundable` made a Locked round refundable after `closeTimestamp + emergencyTimeout`, but `settleRoundWithUpdate` still accepted it afterwards (the relay keeps reports, so the close report stayed available). A losing bettor refunded their stake, then anyone settled the round: `netPayoutPool` was computed from the full pool, so winners were paid the refunded stake a second time, out of other rounds' money. `emergencyTimeout` was also read live, so the owner could make in-flight rounds refundable (or not) at will.
+**Fix.** Each round stores `expiryTimestamp = close + emergencyTimeout` at start. Lock, settle and finalize revert after it; refunds are possible only after it. A round resolves exactly one way.
+**Test.** `[SEC-29]`: after expiry and a refund, settle and lock revert, everyone still refunds; lowering the timeout does not make an in-flight round refundable early. `test:fuzz` checks after every step that a round anyone was refunded from never settles. Mutations: settle after expiry, live timeout: caught.
+**Old deployments** keep this bug: they are paused with their markets deactivated (`npm run retire`), which blocks new rounds; claims stay open.
 
 ### SEC-23: Oracle licence and terms (High, legal) 🟡
 RedStone's EVM connector package ships its Solidity under **BUSL-1.1** (its package.json says MIT; the licence grant text is not included). We do not use that code: `SignedPriceOracle.sol` is an independent MIT implementation of the public data-package format. Whether RedStone's free gateway data may be used in production without an agreement is **not confirmed**.
@@ -212,6 +226,8 @@ RedStone's EVM connector package ships its Solidity under **BUSL-1.1** (its pack
 
 ## Breaking changes introduced by these fixes
 
+- 2026-09-26 (SEC-28/29): `Round` re-packed (`uint32 roundId`, `uint40` timestamps) with new fields `expiryTimestamp`, `finalizeAfter`, `maxReportDelay`; decode it by field name. Added `finalizeRound`, `MAX_REPORT_DELAY`, `CHALLENGE_PERIOD`, event `ClosePriceProposed`; `RoundLocked` may be emitted again when a late lock report is replaced. `lockRoundWithUpdate` also accepts an earlier report on a Locked round. Lock and close times are multiples of `priceWindow`. `minBet` may be up to 1000 MON.
+
 The contract is not upgradeable. **These fixes require a fresh deployment**, then `NEXT_PUBLIC_CONTRACT_ADDRESS` and `NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK` set to the values `npm run deploy` prints.
 
 - Removed: `lockRound(bytes32,uint256)`, `settleRound(bytes32,uint256)`, `maxLockDelay`, `maxSettleDelay`, `oracleMaxStaleness`, `MAX_LOCK_DELAY()`, `MAX_SETTLE_DELAY()`, `ORACLE_MAX_STALENESS()`, the 5- and 6-arg `setProtocolParameters`.
@@ -226,6 +242,7 @@ The contract is not upgradeable. **These fixes require a fresh deployment**, the
 
 | Date | ID(s) | Change |
 |---|---|---|
+| 2026-09-26 | SEC-28, SEC-29, SEC-11, SEC-14, SEC-16, SEC-17, SEC-18 | Production pass. Found and fixed SEC-29 (refund then settle). SEC-28 fixed: reports fetched by timestamp from RedStone's free 24 h history, rounds on the report grid, challengeable late-report backstop. Everything push-based (Monad WebSocket logs/heads, SSE to browsers); no polling. minBet from live gas; owner handover script; randomized invariant test. Deployed `0x31B755F6c4e319AaEAaC7f684C4c2BaB4c1AfDf2`; retired 5 older deployments. Security 92/92, EVM 45/45, app 51/51, mutations 16/16, fuzz 6 seeds, testnet: multi-wallet 27/27, challenge 4/4. |
 | 2026-09-26 | SEC-25, SEC-26, SEC-11 | Raised by the user: refunds are not free once network fees count. Measured real costs on testnet, packed `Round` (−35% to −54% gas on round starts), self-service refunds, fee display and warnings, keeper skips one-sided rounds. Security 70/70, mutations 11/11. |
 | 2026-09-26 | SEC-24 | Idle rounds replaced on the next bet; keeper skips empty rounds. Deployed to Monad testnet at `0x2d983986A906006Fa15479314E6F36cE30550b80` and ran a full round with live RedStone reports (lock, settle, claim). Security 58/58, mutations 10/10. |
 | 2026-09-26 | SEC-01, 02, 21, 22, 23 | Settlement moved from Pyth (API key required since 2026-08-26) to RedStone's free signed reports, verified by our own `SignedPriceOracle.sol`. SEC-01/02 re-proven on the new oracle; added SEC-21/22 with tests and mutations. Suites: invariants 75/75, EVM 42/42 (incl. real RedStone packages on-chain), security 52/52, mutations 9/9 caught. |

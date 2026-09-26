@@ -3,12 +3,10 @@
  * Live prices for the UI.
  *
  * Coinbase (NEXT_PUBLIC_PRICE_SOURCE=coinbase): the chart follows Coinbase's public WebSocket, every
- * trade in USD with ~0.1 s delay and no API key. The official price that decides rounds is still
- * RedStone's, streamed from the relay alongside and reported separately (onOfficial).
+ * trade in USD with ~0.1 s delay and no API key. Rounds are decided by RedStone's signed price at the
+ * lock and close times; those official prices reach the app as contract events (strike, close).
+ * RedStone has no free push feed, and this app does not poll, so there is no live official ticker.
  *
- * RedStone, streamed through scripts/price_relay.js (NEXT_PUBLIC_PRICE_RELAY_URL). This is the oracle
- * the contract settles on, and the relay sends the same median of all signers the contract computes,
- * so the price users watch is the price that decides the round. New reports arrive every 10 seconds.
  * Binance public streams only when chosen explicitly (NEXT_PUBLIC_PRICE_SOURCE=binance). Binance has
  * no MON market, so MON/USD is shown as unavailable in that mode instead of being approximated.
  * The source never switches on its own: if the chosen one is down, the UI shows it as down.
@@ -25,18 +23,17 @@ const BINANCE_SYMBOLS = { BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL' };
 export class LivePriceFeed {
   /** Markets the configured source cannot price, with the reason shown to the user */
   static unavailableMarkets() {
-    if (API_CONFIG.priceSource === 'binance') return { MON: 'MON/USD is priced by RedStone only. Connect the price relay to trade it.' };
+    if (API_CONFIG.priceSource === 'binance') return { MON: 'Binance has no MON/USD market. Use NEXT_PUBLIC_PRICE_SOURCE=coinbase to trade it.' };
     return {};
   }
 
-  constructor(onTickCallback, onStatusCallback, onOfficialCallback) {
+  constructor(onTickCallback, onStatusCallback) {
     this.onTick = onTickCallback;
     this.onStatus = onStatusCallback;
-    this.onOfficial = onOfficialCallback;
     this.isConnected = false;
     this.lastTickTime = 0;
     this.latencyMs = null;
-    this.source = { coinbase: 'Coinbase', redstone: 'RedStone', binance: 'Binance' }[API_CONFIG.priceSource] || null;
+    this.source = { coinbase: 'Coinbase', binance: 'Binance' }[API_CONFIG.priceSource] || null;
     this.prices = {};
     this.stats24h = {};
     for (const k of Object.keys(SUPPORTED_MARKETS)) {
@@ -45,10 +42,7 @@ export class LivePriceFeed {
     }
     this.marketByFeed = new Map(Object.entries(SUPPORTED_MARKETS).map(([k, m]) => [m.feed, k]));
 
-    if (this.source === 'Coinbase') {
-      this.connectCoinbase(0);
-      if (API_CONFIG.priceRelayUrl) this.connectRelay({ officialOnly: true });
-    } else if (this.source === 'RedStone') this.connectRelay();
+    if (this.source === 'Coinbase') this.connectCoinbase(0);
     else if (this.source === 'Binance') this.connectBinance();
     else {
       // Deferred so listeners wired in the caller's constructor receive it
@@ -56,8 +50,8 @@ export class LivePriceFeed {
       return;
     }
 
-    // Report staleness if the stream goes quiet (RedStone publishes every 10s)
-    const staleAfter = this.source === 'RedStone' ? 30000 : 10000;
+    // Report staleness if the stream goes quiet (checks the local clock; nothing is fetched)
+    const staleAfter = 10000;
     this.watchdog = setInterval(() => {
       const stale = Date.now() - this.lastTickTime > staleAfter;
       if (stale && this.isConnected) {
@@ -67,9 +61,6 @@ export class LivePriceFeed {
     }, 2000);
   }
 
-  // ---------------------------------------------------------------------------
-  // RedStone via relay (Server-Sent Events)
-  // ---------------------------------------------------------------------------
   // ---------------------------------------------------------------------------
   // Coinbase public WebSocket (every trade)
   // ---------------------------------------------------------------------------
@@ -110,62 +101,6 @@ export class LivePriceFeed {
       this.updateStatus();
       if (this.destroyed) return;
       setTimeout(() => this.connectCoinbase(attempt + 1), Math.min(15000, 1000 * 2 ** attempt));
-    };
-  }
-
-  // ---------------------------------------------------------------------------
-  // RedStone via relay (Server-Sent Events). With officialOnly, it only reports the official price.
-  // ---------------------------------------------------------------------------
-  connectRelay({ officialOnly = false } = {}) {
-    this.officialOnly = officialOnly;
-    this.es = new EventSource(`${API_CONFIG.priceRelayUrl}/stream`);
-
-    const applySnapshot = (e, initial) => {
-      try {
-        const snap = JSON.parse(e.data);
-        for (const [feed, f] of Object.entries(snap)) {
-          const k = this.marketByFeed.get(feed);
-          if (!k) continue;
-          if (f.p > 0) this.onOfficial?.(k, f.p, f.t);
-          if (this.officialOnly) continue;
-          this.stats24h[k] = { change: f.change24h ?? null };
-          if (initial && f.p > 0) {
-            this.prices[k] = f.p;
-            this.dispatchTick(k, f.p, 0, f.t, true);
-          }
-        }
-      } catch (_) {
-        // Ignore malformed snapshots
-      }
-    };
-
-    this.es.addEventListener('snapshot', (e) => applySnapshot(e, true));
-    this.es.addEventListener('stats', (e) => applySnapshot(e, false));
-    this.es.onmessage = (e) => {
-      try {
-        const { feed, p, t } = JSON.parse(e.data);
-        const k = this.marketByFeed.get(feed);
-        if (!k || !(p > 0) || !Number.isFinite(t)) return;
-        this.onOfficial?.(k, p, t);
-        if (this.officialOnly) return;
-        this.prices[k] = p;
-        this.latencyMs = Math.max(0, Date.now() - t);
-        this.dispatchTick(k, p, 0, t, false);
-        this.updateStatus();
-      } catch (_) {
-        // Ignore malformed ticks
-      }
-    };
-    this.es.onopen = () => {
-      if (this.officialOnly) return;
-      this.isConnected = true;
-      this.updateStatus();
-    };
-    this.es.onerror = () => {
-      // EventSource reconnects on its own
-      if (this.officialOnly) return;
-      this.isConnected = false;
-      this.updateStatus();
     };
   }
 

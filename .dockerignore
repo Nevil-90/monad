@@ -1,0 +1,9 @@
+.env
+.env.*
+node_modules
+.next
+build
+data
+.git
+checklist.md
+archive

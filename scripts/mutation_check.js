@@ -22,11 +22,46 @@ const originals = Object.fromEntries(Object.entries(FILES).map(([k, f]) => [k, f
 
 const MUTATIONS = [
   {
+    id: 'SEC-28',
+    name: 'Settle on a late report at once, with no challenge period',
+    from: '        if (block.timestamp >= round.finalizeAfter) return true;',
+    to: '        return true;',
+    expect: ['SEC-28', 'SEC-02']
+  },
+  {
+    id: 'SEC-28 (replace)',
+    name: 'Let a later report replace the current lock report',
+    from: 'require(publishTime < round.lockPublishTime, "Not earlier than the current lock report");',
+    to: '',
+    expect: ['SEC-28']
+  },
+  {
+    id: 'SEC-29',
+    name: 'Allow settling a round that is already refundable',
+    from: '        require(block.timestamp >= round.closeTimestamp, "Close time not reached");\n        require(block.timestamp <= round.expiryTimestamp, "Round expired: refundable");',
+    to: '        require(block.timestamp >= round.closeTimestamp, "Close time not reached");',
+    expect: ['SEC-29']
+  },
+  {
+    id: 'SEC-29 (snapshot)',
+    name: 'Read the live emergencyTimeout instead of the per-round expiry',
+    from: '(round.status == RoundStatus.Open || round.status == RoundStatus.Locked) && block.timestamp > round.expiryTimestamp',
+    to: '(round.status == RoundStatus.Open || round.status == RoundStatus.Locked) && block.timestamp > round.closeTimestamp + emergencyTimeout',
+    expect: ['SEC-29']
+  },
+  {
     id: 'SEC-01/02',
     name: 'Accept reports from any time within +/-60s instead of the pinned timestamp',
     file: 'oracle',
     from: 'require(r.timestampMs == timestampMs, "Report not at pinned timestamp");',
     to: 'require(r.timestampMs + 60000 >= timestampMs && r.timestampMs <= timestampMs + 60000, "Report not at pinned timestamp");',
+    expect: ['SEC-02']
+  },
+  {
+    id: 'SEC-01/28 (window)',
+    name: 'Accept any report time up to 2 minutes around the pinned mark',
+    from: 'require(publishTime >= first && publishTime <= first + round.maxReportDelay, "Report not at pinned timestamp");',
+    to: 'require(publishTime + 120 >= first && publishTime <= first + 120, "Report not at pinned timestamp");',
     expect: ['SEC-01', 'SEC-02']
   },
   {
@@ -78,7 +113,7 @@ const MUTATIONS = [
     name: 'Use the live lockBufferSeconds instead of the per-round snapshot',
     from: 'block.timestamp <= round.betCloseTimestamp,',
     to: 'block.timestamp <= round.lockTimestamp - lockBufferSeconds,',
-    extra: [['round.betCloseTimestamp = uint64(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));', 'round.betCloseTimestamp = uint64(lock - lockBufferSeconds);']],
+    extra: [['round.betCloseTimestamp = uint40(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));', 'round.betCloseTimestamp = uint40(lock - lockBufferSeconds);']],
     expect: ['SEC-05']
   },
   {

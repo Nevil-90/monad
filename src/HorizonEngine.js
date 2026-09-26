@@ -127,7 +127,7 @@ export class HorizonEngine {
     const now = Date.now();
     this.liveGates = { betCloseAt, lockAt, closeAt, phase };
     const remaining = Math.max(0, (closeAt - now) / 1000);
-    this.round = { remaining, duration, lockBuffer: 0, phase: phase === 'locked' || phase === 'settling' ? 'locked' : 'open', syncedAt: performance.now() };
+    this.round = { remaining, duration, lockBuffer: 0, phase: phase === 'locked' || phase === 'settling' || phase === 'confirming' ? 'locked' : 'open', syncedAt: performance.now() };
   }
 
   setPools(up, down) {
@@ -319,6 +319,9 @@ export class HorizonEngine {
     };
     const horizonY = (F.plotTop + F.plotBottom) / 2;
     const amplitude = (F.plotBottom - F.plotTop) / 2;
+    // A window too short or narrow for a chart (e.g. with DevTools open): draw nothing this frame rather
+    // than shapes with negative sizes, which the canvas rejects
+    if (amplitude < 12 || F.x1 - F.x0 < 60) return;
 
     // Time scale: zoom sets px per second; "now" leaves room for the round ahead
     const elapsedSinceSync = (performance.now() - this.round.syncedAt) / 1000;
@@ -424,7 +427,7 @@ export class HorizonEngine {
     this.drawVolume(ctx, F, candles, xAt, tfMs, spacing, ref);
 
     // --- 3. Gates ------------------------------------------------------------------
-    this.drawGates(ctx, F, xAt, now, remaining);
+    this.drawGates(ctx, F, xAt, now);
 
     // --- 4. Horizon (strike) line; beats once per second in the final 5s ----------
     let beat = 0;
@@ -636,57 +639,42 @@ export class HorizonEngine {
     ctx.restore();
   }
 
-  drawGates(ctx, F, xAt, now, remaining) {
-    if (this.liveGates) return this.drawLiveGates(ctx, F, xAt, now);
-    const settleAt = now + remaining * 1000;
-    const lockAt = settleAt - this.round.lockBuffer * 1000;
-    const secs = (t) => `${Math.max(0, Math.ceil((t - now) / 1000))}s`;
-    const showLock = this.round.phase === 'open' && lockAt > now;
-    const lockX = xAt(lockAt);
-    const settleX = xAt(settleAt);
-    // Close gates share one label so the text never overlaps
-    const together = showLock && settleX - lockX < 110;
-    const gate = (x, label, alpha) => {
-      if (x < F.x0 || x > F.x1) return;
-      ctx.save();
-      ctx.strokeStyle = rgba(COLORS.ink, alpha);
-      ctx.setLineDash([3, 5]);
-      ctx.beginPath(); ctx.moveTo(x, F.plotTop); ctx.lineTo(x, F.volBottom); ctx.stroke();
-      ctx.setLineDash([]);
-      if (label) {
-        ctx.font = `600 9px ${FONT}`;
-        ctx.textAlign = 'center';
-        ctx.fillStyle = rgba(COLORS.ink, Math.min(1, alpha + 0.4));
-        ctx.fillText(label, x, F.plotTop - 6);
-      }
-      ctx.restore();
-    };
-    if (showLock) gate(lockX, together ? null : `BETS CLOSE ${secs(lockAt)}`, 0.25);
-    gate(settleX, together ? `CLOSE ${secs(lockAt)} · SETTLE ${secs(settleAt)}` : `SETTLES ${secs(settleAt)}`,
-      this.round.phase === 'locked' ? 0.55 : 0.3);
+  /** Round marker, from the contract's round only; nothing until it has been read */
+  drawGates(ctx, F, xAt, now) {
+    if (this.liveGates) this.drawLiveGates(ctx, F, xAt, now);
   }
 
+  /**
+   * One marker: the next thing that happens in the round, in plain words (the round console has the
+   * full timeline). Several dashed lines with their own countdowns were hard to read and overlapped.
+   */
   drawLiveGates(ctx, F, xAt, now) {
     const { betCloseAt, lockAt, closeAt, phase } = this.liveGates;
-    if (phase === 'idle' || phase === 'ended') return;
-    const secs = (t) => `${Math.max(0, Math.ceil((t - now) / 1000))}s`;
-    const gate = (t, label, alpha) => {
-      const x = xAt(t);
-      if (x < F.x0 || x > F.x1) return;
-      ctx.save();
-      ctx.strokeStyle = rgba(COLORS.ink, alpha);
-      ctx.setLineDash([3, 5]);
-      ctx.beginPath(); ctx.moveTo(x, F.plotTop); ctx.lineTo(x, F.volBottom); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.font = `600 9px ${FONT}`;
-      ctx.textAlign = 'center';
-      ctx.fillStyle = rgba(COLORS.ink, Math.min(1, alpha + 0.4));
-      ctx.fillText(label, x, F.plotTop - 6);
-      ctx.restore();
+    const clock = (t) => {
+      const s = Math.max(0, Math.ceil((t - now) / 1000));
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
     };
-    if (phase === 'open') gate(betCloseAt, `BETS CLOSE ${secs(betCloseAt)}`, 0.25);
-    if (phase === 'open' || phase === 'closed') gate(lockAt, `STRIKE ${secs(lockAt)}`, 0.35);
-    gate(closeAt, phase === 'settling' ? 'SETTLING' : `SETTLES ${secs(closeAt)}`, phase === 'locked' || phase === 'settling' ? 0.55 : 0.3);
+    const next = {
+      open: { t: betCloseAt, label: `BETTING CLOSES ${clock(betCloseAt)}`, alpha: 0.35 },
+      closed: { t: lockAt, label: `PRICE LOCKS ${clock(lockAt)}`, alpha: 0.45 },
+      locked: { t: closeAt, label: `RESULT IN ${clock(closeAt)}`, alpha: 0.55 },
+      settling: { t: closeAt, label: 'RESULT COMING', alpha: 0.55 },
+      confirming: { t: closeAt, label: 'CONFIRMING PRICE', alpha: 0.55 }
+    }[phase];
+    if (!next) return;
+    const x = xAt(next.t);
+    if (x < F.x0 || x > F.x1) return;
+    ctx.save();
+    ctx.strokeStyle = rgba(COLORS.ink, next.alpha);
+    ctx.setLineDash([3, 5]);
+    ctx.beginPath(); ctx.moveTo(x, F.plotTop); ctx.lineTo(x, F.volBottom); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = `600 9px ${FONT}`;
+    const w = ctx.measureText(next.label).width;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = rgba(COLORS.ink, Math.min(1, next.alpha + 0.4));
+    ctx.fillText(next.label, Math.min(F.x1 - w / 2, Math.max(F.x0 + w / 2, x)), F.plotTop - 6);
+    ctx.restore();
   }
 
   drawEntry(ctx, x, y, pos) {
@@ -1026,6 +1014,7 @@ export class HorizonEngine {
   }
 
   drawBloom(ctx, cx, cy, rx, ry, color, alpha, above) {
+    if (!(rx > 1 && ry > 1)) return;
     ctx.save();
     ctx.beginPath();
     if (above) ctx.rect(0, cy - ry * 2, this.width, ry * 2);

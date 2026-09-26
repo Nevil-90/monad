@@ -1,7 +1,7 @@
 /**
  * PriceStore.js
  * Price history shared by the line and candle views: 1s and 1m OHLC(V) bars, preloaded from the
- * same source as live prices (the RedStone relay, or Binance klines when Binance is chosen), then
+ * same source as live prices (Coinbase candles and trades, or Binance klines when Binance is chosen), then
  * updated from live ticks. RedStone reports come every 10 seconds and carry no trade volume, so in
  * RedStone mode points are 10s apart and the volume strip stays empty.
  */
@@ -10,6 +10,7 @@ import { API_CONFIG } from './config.js';
 
 const MAX_1S = 3600;
 const MAX_1M = 1000;
+const MAX_FILL = 720; // flat candles per gap: 1 hour of 5 s candles
 
 export class PriceStore {
   constructor() {
@@ -38,23 +39,6 @@ export class PriceStore {
   }
 
   async loadFrom(market, token) {
-    if (API_CONFIG.priceSource === 'redstone') {
-      try {
-        const res = await fetch(`${API_CONFIG.priceRelayUrl}/history?feed=${market.feed}`, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const points = await res.json();
-        if (token !== this.loadToken) return;
-        const live = { s: this.bars1s, m: this.bars1m };
-        this.bars1s = [];
-        this.bars1m = [];
-        for (const [t, p] of points) this.push(p, 0, t);
-        this.bars1s = this.merge(this.bars1s, live.s);
-        this.bars1m = this.merge(this.bars1m, live.m);
-      } catch (err) {
-        console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
-      }
-      return;
-    }
     if (API_CONFIG.priceSource === 'coinbase' && market.coinbase) {
       try {
         const base = `${API_CONFIG.coinbaseRestUrl}/products/${market.coinbase}`;
@@ -127,10 +111,33 @@ export class PriceStore {
     }
   }
 
-  /** OHLCV candles for a timeframe in seconds (5, 15 or 60) */
-  candles(tf) {
-    if (tf === 60) return this.bars1m;
+  /**
+   * OHLCV candles for a timeframe in seconds (5, 15 or 60). An interval with no trade is a flat candle
+   * at the last traded price with zero volume, as exchanges draw it: thinly traded markets (MON/USD
+   * trades every few seconds) would otherwise show scattered bars with gaps between them.
+   */
+  candles(tf, now = Date.now()) {
     const ms = tf * 1000;
+    return PriceStore.fillGaps(tf === 60 ? this.bars1m : this.aggregate(ms), ms, now);
+  }
+
+  static fillGaps(bars, ms, now) {
+    if (!bars.length) return bars;
+    const out = [];
+    const last = Math.floor(now / ms) * ms;
+    for (let i = 0; i < bars.length; i++) {
+      const b = bars[i];
+      const prev = out[out.length - 1];
+      // At most MAX_FILL flat candles per gap (a long outage shows as a gap, not hours of flat bars)
+      if (prev) for (let t = prev.t + ms, n = 0; t < b.t && n < MAX_FILL; t += ms, n++) out.push({ t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0 });
+      out.push(b);
+    }
+    const end = out[out.length - 1];
+    for (let t = end.t + ms, n = 0; t <= last && n < MAX_FILL; t += ms, n++) out.push({ t, o: end.c, h: end.c, l: end.c, c: end.c, v: 0 });
+    return out;
+  }
+
+  aggregate(ms) {
     const out = [];
     for (const b of this.bars1s) {
       const t = Math.floor(b.t / ms) * ms;

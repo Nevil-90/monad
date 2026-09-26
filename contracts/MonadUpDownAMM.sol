@@ -30,19 +30,22 @@ contract MonadUpDownAMM is SignedPriceOracle {
     // SEC-25: packed so a new round writes 3 fresh storage slots instead of 10. Starting a round is
     // paid by the settling keeper or the first bettor, and Monad charges the full gas limit.
     struct Round {
-        // slot: schedule
-        uint64 roundId;
-        uint64 startTimestamp;
-        uint64 lockTimestamp;
-        uint64 closeTimestamp;
-        // slot: snapshots taken at round start (SEC-05) and pinned report times (SEC-01/02)
-        uint64 betCloseTimestamp;  // betting cutoff (immune to later owner param changes)
-        uint64 lockPublishTime;    // timestamp (s) of the pinned lock report
-        uint64 closePublishTime;   // timestamp (s) of the pinned close report
+        // slot: schedule, snapshotted at round start (SEC-05) so owner changes never touch it
+        uint32 roundId;
+        uint40 startTimestamp;
+        uint40 lockTimestamp;
+        uint40 closeTimestamp;
+        uint40 betCloseTimestamp;  // betting cutoff
+        uint40 expiryTimestamp;    // closeTimestamp + emergencyTimeout: unresolved after this = refund (SEC-29)
+        uint16 priceWindow;        // oracle report interval in seconds (report times are its multiples)
+        // slot: prices and fees
+        uint40 lockPublishTime;    // timestamp (s) of the report the lock price comes from
+        uint40 closePublishTime;   // timestamp (s) of the proposed/final close report; 0 = none yet
+        uint40 finalizeAfter;      // end of the challenge period for a late report (SEC-28); 0 = none
         uint16 feeBps;             // protocolTotalFeeBps at round start
         uint16 creatorFeeBps;
         uint16 keeperFeeBps;
-        uint16 priceWindow;        // oracle report interval in seconds (prices are pinned to its multiples)
+        uint16 maxReportDelay;     // latest accepted report: pinned time + this many seconds (SEC-28)
         // slot: state
         address lockKeeper;
         RoundStatus status;
@@ -92,7 +95,13 @@ contract MonadUpDownAMM is SignedPriceOracle {
     // Past reports cannot be fetched from the free gateway, so if nobody captured a round's report
     // the round is refunded after this timeout instead of waiting hours (SEC-21).
     uint256 public emergencyTimeout = 10 minutes;
-    uint256 public minBet = 0.001 ether;       // Minimum bet in native MON
+    // SEC-28: the free gateway misses some report timestamps entirely. If the pinned report was never
+    // captured, a later one (up to MAX_REPORT_DELAY after, clamped to half the round) is accepted
+    // provisionally, and for CHALLENGE_PERIOD anyone can replace it with an earlier valid report.
+    // The final price is the earliest report anyone captured; the pinned report settles at once.
+    uint256 public constant MAX_REPORT_DELAY = 30;
+    uint256 public constant CHALLENGE_PERIOD = 60;
+    uint256 public minBet = 0.001 ether;       // Minimum bet in native MON; set from live gas at deploy (SEC-11)
     uint256 public constant MIN_ROUND_DURATION = 30;   // Minimum 30s round
     uint256 public constant MAX_ROUND_DURATION = 86400;// Maximum 1 day
 
@@ -145,7 +154,11 @@ contract MonadUpDownAMM is SignedPriceOracle {
     );
     event RoundStarted(bytes32 indexed marketId, uint256 indexed roundId, uint256 lockTimestamp, uint256 closeTimestamp);
     event BetPlaced(bytes32 indexed marketId, uint256 indexed roundId, address indexed user, Side side, uint256 amount);
+    // Emitted again when a challenger replaces a late lock report with an earlier one (SEC-28)
     event RoundLocked(bytes32 indexed marketId, uint256 indexed roundId, uint256 lockPrice);
+    // A close price that cannot be challenged anymore settles in the same transaction; otherwise it is
+    // proposed here and finalizeRound() settles it after finalizeAfter (SEC-28)
+    event ClosePriceProposed(bytes32 indexed marketId, uint256 indexed roundId, uint256 closePrice, uint256 publishTime, uint256 finalizeAfter);
     event RoundSettled(
         bytes32 indexed marketId,
         uint256 indexed roundId,
@@ -213,7 +226,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
         require(_lockBuffer >= 5 && _lockBuffer <= 60, "Invalid lock buffer");
         require(_priceWindow >= 1 && _priceWindow <= 60, "Invalid price window");
         require(_emergencyTimeout >= 5 minutes && _emergencyTimeout <= 24 hours, "Invalid emergency timeout");
-        require(_minBet > 0 && _minBet <= 1 ether, "Invalid min bet");
+        require(_minBet > 0 && _minBet <= 1000 ether, "Invalid min bet");
         lockBufferSeconds = _lockBuffer;
         priceWindowSeconds = _priceWindow;
         emergencyTimeout = _emergencyTimeout;
@@ -321,15 +334,23 @@ contract MonadUpDownAMM is SignedPriceOracle {
         newRoundId = market.currentRoundId + 1;
         market.currentRoundId = newRoundId;
 
+        // Lock and close fall exactly on the oracle's report grid (multiples of priceWindow), so the
+        // report that settles a round is the one signed at its close time: nobody waits up to a whole
+        // report interval after close for the next one.
+        uint256 half = market.roundDuration / 2;
+        uint256 window = priceWindowSeconds < half ? priceWindowSeconds : half;
         uint256 start = block.timestamp;
-        uint256 lock = start + market.roundDuration;
+        uint256 lock = _pinnedTimestamp(start + market.roundDuration, window);
         uint256 close = lock + market.roundDuration;
 
         Round storage round = rounds[marketId][newRoundId];
-        round.roundId = uint64(newRoundId);
-        round.startTimestamp = uint64(start);
-        round.lockTimestamp = uint64(lock);
-        round.closeTimestamp = uint64(close);
+        round.roundId = uint32(newRoundId);
+        round.startTimestamp = uint40(start);
+        round.lockTimestamp = uint40(lock);
+        round.closeTimestamp = uint40(close);
+        // SEC-29: fixed per round, so a later change to emergencyTimeout cannot make an in-flight
+        // round refundable (or resolvable) at a different time
+        round.expiryTimestamp = uint40(close + emergencyTimeout);
         round.status = RoundStatus.Open;
         // Fees are capped at 1000 bps by setProtocolFees, so they fit uint16
         round.feeBps = uint16(protocolTotalFeeBps);
@@ -337,10 +358,11 @@ contract MonadUpDownAMM is SignedPriceOracle {
         round.keeperFeeBps = uint16(keeperFeeBps);
 
         // SEC-05: snapshot timing and clamp to half the duration so betting always has a window
-        // and the lock/close price windows can never overlap.
-        uint256 half = market.roundDuration / 2;
-        round.betCloseTimestamp = uint64(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));
-        round.priceWindow = uint16(priceWindowSeconds < half ? priceWindowSeconds : half);
+        // and the lock/close report windows can never overlap (pinned lock + priceWindow + delay
+        // stays below closeTimestamp).
+        round.betCloseTimestamp = uint40(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));
+        round.priceWindow = uint16(window);
+        round.maxReportDelay = uint16(MAX_REPORT_DELAY < half ? MAX_REPORT_DELAY : half);
 
         emit RoundStarted(marketId, newRoundId, lock, close);
     }
@@ -445,10 +467,13 @@ contract MonadUpDownAMM is SignedPriceOracle {
     }
 
     /**
-     * @notice Lock a round. The lock price is PINNED to the signed report at the first
-     * priceWindow multiple at/after round.lockTimestamp (SEC-01/02), so neither the caller nor the
-     * call time can influence it. See lockReportTimestamp().
-     * @param reports Signed reports for that timestamp. May be empty if the round is uncontested.
+     * @notice Lock a round with the signed reports for its lock time (SEC-01/02, SEC-28).
+     * The lock price is the report at the first priceWindow multiple at/after round.lockTimestamp
+     * (lockReportTimestamp()). If nobody captured that report, a later one up to maxReportDelay after
+     * it is accepted provisionally; while the round is Locked and unsettled, anyone can call this
+     * again with an EARLIER valid report to replace it (and takes the lock bounty). Settlement waits
+     * for the challenge period, so the final lock price is the earliest report anyone captured.
+     * @param reports Signed reports for one timestamp. May be empty if the round is uncontested.
      */
     function lockRoundWithUpdate(
         bytes32 marketId,
@@ -456,29 +481,41 @@ contract MonadUpDownAMM is SignedPriceOracle {
         SignedPrice[] calldata reports
     ) external nonReentrant {
         Round storage round = rounds[marketId][roundId];
-        require(round.status == RoundStatus.Open, "Not open");
+        require(round.status == RoundStatus.Open || round.status == RoundStatus.Locked, "Not open");
         require(block.timestamp >= round.lockTimestamp, "Lock time not reached");
 
-        // SEC-04: no "late lock => cancel" rule. The price is pinned, so lateness gives nobody an option.
-        if (round.totalUp == 0 || round.totalDown == 0) {
+        // SEC-04: no "late lock => cancel" rule. The price is fixed by the reports, not the call time.
+        if (round.status == RoundStatus.Open && (round.totalUp == 0 || round.totalDown == 0)) {
             round.status = RoundStatus.Cancelled;
             emit RoundCancelled(marketId, roundId, "Uncontested pool: opposite side has zero liquidity");
             _startRoundIfActive(marketId);
-        } else {
-            (uint256 price, uint256 publishTime) =
-                _pinnedPrice(markets[marketId].feedId, reports, round.lockTimestamp, round.priceWindow);
-            round.lockPrice = price;
-            round.lockPublishTime = uint64(publishTime);
-            round.lockKeeper = msg.sender; // Record keeper for bounty split
-            round.status = RoundStatus.Locked;
-            emit RoundLocked(marketId, roundId, price);
+            return;
         }
+        // SEC-29: past expiry the round is refundable; resolving it now could pay winners from
+        // stakes already refunded
+        require(block.timestamp <= round.expiryTimestamp, "Round expired: refundable");
+
+        (uint256 price, uint256 publishTime, bool pinned) =
+            _reportPrice(markets[marketId].feedId, reports, round.lockTimestamp, round);
+        if (round.status == RoundStatus.Open) {
+            round.status = RoundStatus.Locked;
+            // A late report opens the challenge period for an earlier one
+            if (!pinned) round.finalizeAfter = uint40(block.timestamp + CHALLENGE_PERIOD);
+        } else {
+            require(publishTime < round.lockPublishTime, "Not earlier than the current lock report");
+        }
+        round.lockPrice = price;
+        round.lockPublishTime = uint40(publishTime);
+        round.lockKeeper = msg.sender; // Record keeper for bounty split
+        emit RoundLocked(marketId, roundId, price);
     }
 
     /**
-     * @notice Settle a round. The close price is PINNED to the signed report at the first
-     * priceWindow multiple at/after round.closeTimestamp (SEC-01/02). See closeReportTimestamp().
-     * Stored/stale prices are never read.
+     * @notice Settle a round with the signed reports for its close time (SEC-01/02, SEC-28).
+     * The pinned close report (closeReportTimestamp()) settles immediately once the lock price can no
+     * longer change. A later report, up to maxReportDelay after it, is only proposed: anyone can
+     * replace it with an earlier valid report by calling this again, and finalizeRound() settles
+     * after the challenge period. Stored/stale prices are never read.
      */
     function settleRoundWithUpdate(
         bytes32 marketId,
@@ -488,16 +525,52 @@ contract MonadUpDownAMM is SignedPriceOracle {
         Round storage round = rounds[marketId][roundId];
         require(round.status == RoundStatus.Locked, "Round not locked");
         require(block.timestamp >= round.closeTimestamp, "Close time not reached");
+        require(block.timestamp <= round.expiryTimestamp, "Round expired: refundable");
 
-        Market storage market = markets[marketId];
-        (uint256 price, uint256 publishTime) =
-            _pinnedPrice(market.feedId, reports, round.closeTimestamp, round.priceWindow);
+        (uint256 price, uint256 publishTime, bool pinned) =
+            _reportPrice(markets[marketId].feedId, reports, round.closeTimestamp, round);
         // Defence in depth: windows cannot overlap (SEC-05 clamp), but never accept a non-later price.
         require(publishTime > round.lockPublishTime, "Close price not after lock price");
-
+        if (round.closePublishTime == 0) {
+            if (!pinned) {
+                uint256 challengeEnd = block.timestamp + CHALLENGE_PERIOD;
+                if (challengeEnd > round.finalizeAfter) round.finalizeAfter = uint40(challengeEnd);
+            }
+        } else {
+            require(publishTime < round.closePublishTime, "Not earlier than the current close report");
+        }
         round.closePrice = price;
-        round.closePublishTime = uint64(publishTime);
+        round.closePublishTime = uint40(publishTime);
 
+        if (_finalizable(round)) {
+            _settle(marketId, roundId, round);
+        } else {
+            emit ClosePriceProposed(marketId, roundId, price, publishTime, round.finalizeAfter);
+        }
+    }
+
+    /**
+     * @notice Settles a round whose close price was proposed, once its challenge period has passed.
+     * Anyone can call it; the caller takes the settle half of the keeper bounty.
+     */
+    function finalizeRound(bytes32 marketId, uint256 roundId) external nonReentrant {
+        Round storage round = rounds[marketId][roundId];
+        require(round.status == RoundStatus.Locked && round.closePublishTime != 0, "No proposed close price");
+        require(block.timestamp <= round.expiryTimestamp, "Round expired: refundable");
+        require(_finalizable(round), "Challenge period not over");
+        _settle(marketId, roundId, round);
+    }
+
+    /// @dev Neither price can change anymore: both are the pinned reports, or the challenge period is over
+    function _finalizable(Round storage round) internal view returns (bool) {
+        if (block.timestamp >= round.finalizeAfter) return true;
+        return round.lockPublishTime == _pinnedTimestamp(round.lockTimestamp, round.priceWindow)
+            && round.closePublishTime == _pinnedTimestamp(round.closeTimestamp, round.priceWindow);
+    }
+
+    function _settle(bytes32 marketId, uint256 roundId, Round storage round) private {
+        Market storage market = markets[marketId];
+        uint256 price = round.closePrice;
         if (price == round.lockPrice) {
             // Genuine tie between two distinct, pinned observations: 100% refund
             round.winningSide = Side.None;
@@ -541,16 +614,26 @@ contract MonadUpDownAMM is SignedPriceOracle {
         return ((target + interval - 1) / interval) * interval;
     }
 
-    function _pinnedPrice(
+    /**
+     * @dev Verifies reports for one report time in [pinned, pinned + maxReportDelay], where pinned is
+     * the first priceWindow multiple at/after `target`. Every report must carry that same timestamp
+     * (_verifiedMedian). `pinned` tells whether it is the earliest possible report.
+     */
+    function _reportPrice(
         bytes32 feedId,
         SignedPrice[] calldata reports,
         uint256 target,
-        uint256 interval
-    ) internal view returns (uint256 price, uint256 publishTime) {
+        Round storage round
+    ) internal view returns (uint256 price, uint256 publishTime, bool pinned) {
         require(reports.length > 0, "Price update required");
-        publishTime = _pinnedTimestamp(target, interval);
+        uint256 first = _pinnedTimestamp(target, round.priceWindow);
+        uint256 tsMs = reports[0].timestampMs;
+        require(tsMs % 1000 == 0 && (tsMs / 1000) % round.priceWindow == 0, "Report not at pinned timestamp");
+        publishTime = tsMs / 1000;
+        require(publishTime >= first && publishTime <= first + round.maxReportDelay, "Report not at pinned timestamp");
+        pinned = publishTime == first;
         // 8-decimal oracle value -> 36-decimal price scale used throughout
-        price = _verifiedMedian(feedId, publishTime * 1000, reports) * 1e28;
+        price = _verifiedMedian(feedId, tsMs, reports) * 1e28;
     }
 
     /// @notice Timestamp (seconds) of the report that locks this round; the keeper submits reports for it
@@ -618,10 +701,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
             round.status == RoundStatus.Open || round.status == RoundStatus.Locked,
             "Round already resolved"
         );
-        require(
-            block.timestamp > round.closeTimestamp + emergencyTimeout,
-            "Emergency timeout has not expired"
-        );
+        require(block.timestamp > round.expiryTimestamp, "Emergency timeout has not expired");
 
         round.status = RoundStatus.Cancelled;
         emit RoundCancelled(marketId, roundId, "Emergency timeout: unresolved round cancelled for full refund");
@@ -700,14 +780,15 @@ contract MonadUpDownAMM is SignedPriceOracle {
     /**
      * @dev SEC-26: a refund never waits for anyone else's transaction. Besides cancelled rounds, a
      * round that can no longer be contested (one side empty once betting closed) or can no longer be
-     * resolved (past closeTimestamp + emergencyTimeout) is refundable directly.
+     * resolved (past its expiryTimestamp) is refundable directly. SEC-29: lock, settle and finalize
+     * all refuse after expiryTimestamp, so a refunded round can never be settled afterwards.
      */
     function _isRefundable(Round storage round) internal view returns (bool) {
         if (round.status == RoundStatus.Cancelled) return true;
         if (round.status == RoundStatus.Open && block.timestamp > round.betCloseTimestamp && (round.totalUp == 0 || round.totalDown == 0)) {
             return true;
         }
-        if ((round.status == RoundStatus.Open || round.status == RoundStatus.Locked) && block.timestamp > round.closeTimestamp + emergencyTimeout) {
+        if ((round.status == RoundStatus.Open || round.status == RoundStatus.Locked) && block.timestamp > round.expiryTimestamp) {
             return true;
         }
         return false;

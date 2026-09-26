@@ -27,15 +27,12 @@ const env = {
 const numberOrNull = (v) => (v === undefined || v === '' ? null : Number(v));
 
 export const API_CONFIG = {
-  // Price source for the UI: RedStone, the oracle the contract settles on, through the keyless relay
-  // (scripts/price_relay.js at NEXT_PUBLIC_PRICE_RELAY_URL). Binance only when chosen explicitly with
-  // NEXT_PUBLIC_PRICE_SOURCE=binance (smoother ticks, no MON market, not the settlement price). With
-  // neither there is no source, and the UI says so. The source never switches on its own.
-  // NEXT_PUBLIC_PRICE_SOURCE=coinbase: the chart streams Coinbase's public WebSocket (every trade, ~0.1s),
-  // while strike and settlement stay on RedStone (shown as the official price, from the relay).
+  // Chart price source, chosen with NEXT_PUBLIC_PRICE_SOURCE: 'coinbase' (public WebSocket, every trade,
+  // ~0.1 s, all four markets in USD) or 'binance' (no MON market). Unset means no source, and the UI
+  // says so. The source never switches on its own. Strike and settlement are always RedStone's signed
+  // prices, which arrive as contract events through the relay (NEXT_PUBLIC_PRICE_RELAY_URL).
   priceSource: env.PRICE_SOURCE === 'coinbase' ? 'coinbase'
-    : env.PRICE_SOURCE === 'binance' ? 'binance'
-    : env.PRICE_RELAY_URL ? 'redstone' : null,
+    : env.PRICE_SOURCE === 'binance' ? 'binance' : null,
   priceRelayUrl: env.PRICE_RELAY_URL ? env.PRICE_RELAY_URL.replace(/\/$/, '') : null,
   redstoneGatewayUrl: REDSTONE_GATEWAY,
   coinbaseWsUrl: 'wss://ws-feed.exchange.coinbase.com',
@@ -44,14 +41,25 @@ export const API_CONFIG = {
   binanceWsUrl: 'wss://stream.binance.com:9443'
 };
 
+// Public facts of the Monad chains. The app runs on the one NEXT_PUBLIC_CHAIN_ID names (testnet by
+// default); any other id is a local chain and needs NEXT_PUBLIC_RPC_URL.
+const KNOWN_CHAINS = {
+  10143: { name: 'Monad Testnet', rpcUrl: 'https://testnet-rpc.monad.xyz', explorerUrl: 'https://testnet.monadexplorer.com' },
+  143: { name: 'Monad Mainnet', rpcUrl: 'https://rpc.monad.xyz', explorerUrl: 'https://monadexplorer.com' }
+};
 const chainId = env.CHAIN_ID ? Number(env.CHAIN_ID) : 10143;
+const known = KNOWN_CHAINS[chainId] || null;
+const rpcUrl = env.RPC_URL || known?.rpcUrl || null;
 
 export const NETWORK_CONFIG = {
   chainId,
   chainIdHex: `0x${chainId.toString(16)}`,
-  chainName: chainId === 10143 ? 'Monad Testnet' : `Local chain ${chainId}`,
-  rpcUrl: env.RPC_URL || 'https://testnet-rpc.monad.xyz',
-  explorerUrl: env.EXPLORER_URL || 'https://testnet.monadexplorer.com',
+  chainName: known ? known.name : `Local chain ${chainId}`,
+  isMainnet: chainId === 143,
+  rpcUrl,
+  // Push subscriptions (new blocks, contract logs) use the same endpoint over WebSocket
+  wsUrl: rpcUrl ? rpcUrl.replace(/^http/, 'ws') : null,
+  explorerUrl: env.EXPLORER_URL || known?.explorerUrl || null,
   contractAddress: env.CONTRACT_ADDRESS || null,
   nativeCurrency: {
     name: 'Monad',
@@ -74,7 +82,9 @@ export const ENVIRONMENTS = {
     chainIdHex: '0x8f',
     name: 'Monad Mainnet',
     rpcUrl: 'https://rpc.monad.xyz',
+    wsUrl: 'wss://rpc.monad.xyz',
     explorerUrl: 'https://monadexplorer.com',
+    isMainnet: true,
     contractAddress: env.MAINNET_CONTRACT_ADDRESS || null,
     deployBlock: numberOrNull(env.MAINNET_DEPLOY_BLOCK),
     nativeCurrency: NETWORK_CONFIG.nativeCurrency,

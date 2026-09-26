@@ -56,3 +56,8 @@ function stop(code = 0) {
 
 process.on('SIGINT', () => stop(0));
 process.on('SIGTERM', () => stop(0));
+process.on('SIGHUP', () => stop(0));
+// If whatever started this (npm, a terminal) is killed outright, stop the children too instead of
+// leaving a relay, keeper and app running in the background (a local check, no network)
+const parent = process.ppid;
+setInterval(() => { if (process.ppid !== parent) stop(0); }, 2000).unref();

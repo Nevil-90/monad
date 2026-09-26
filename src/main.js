@@ -71,6 +71,7 @@ export function startApp() {
     result: $('result'),
     resultTitle: $('result-title'),
     resultSub: $('result-sub'),
+    resultState: $('result-state'),
     console: $('console'),
     betUp: $('bet-up'),
     betDown: $('bet-down'),
@@ -246,6 +247,21 @@ export function startApp() {
       bootStep('network');
     }
     if (p?.minBetWei !== undefined) minBetMon = Number(ethers.formatEther(p.minBetWei));
+    if (p?.lockBufferSeconds !== undefined && p?.priceWindowSeconds !== undefined) {
+      roundRules = { lockBuffer: p.lockBufferSeconds, priceWindow: p.priceWindowSeconds };
+    }
+  }
+
+  // Timeline a bet would start right now, by the contract's rules (_startRound): the strike locks on
+  // the first report-grid mark one round length ahead, betting closes lockBuffer before it, and the
+  // round settles one round length after the strike. Shown while no round is running.
+  let roundRules = null;
+  function projectedRound(duration, nowMs) {
+    if (!roundRules) return null;
+    const half = Math.floor(duration / 2);
+    const w = Math.min(roundRules.priceWindow, half);
+    const lock = Math.ceil((Math.floor(nowMs / 1000) + duration) / w) * w;
+    return { betCloseAt: (lock - Math.min(roundRules.lockBuffer, half)) * 1000, lockAt: lock * 1000, closeAt: (lock + duration) * 1000 };
   }
 
   // ---------------------------------------------------------------------------
@@ -410,27 +426,15 @@ export function startApp() {
     lastHeroPrice = price;
   }
 
-  // With a fast chart feed (Coinbase), what decides the round is the official RedStone price; the
-  // distance to the strike and the winning/behind chip use it. Otherwise the chart price is official.
-  const splitFeeds = API_CONFIG.priceSource === 'coinbase';
-  const decidingPrice = (market, price) => (splitFeeds ? market.official?.price ?? null : price);
-
-  function paintOfficial(market) {
-    if (!splitFeeds) return;
-    const o = market.official;
-    const node = $('official-val');
-    if (!o) {
-      node.textContent = '—';
-      return;
-    }
-    const age = Math.max(0, Math.round((Date.now() - o.time) / 1000));
-    node.innerHTML = `${fmtPrice(o.price, market.decimals)} <span class="official-age">${age}s ago</span>`;
-  }
+  // The chart is an exchange price (Coinbase); the round is decided by RedStone's signed price at the
+  // close time, the median of several sources. They agree to a few hundredths of a percent, so a
+  // position closer to the strike than CLOSE_CALL_PCT is shown as too close to call, not as winning.
+  const CLOSE_CALL_PCT = 0.02;
+  const closeCall = (price, strike) => Math.abs((price - strike) / strike) * 100 < CLOSE_CALL_PCT;
 
   function paintReadout(market, price) {
     const d = market.decimals;
-    paintOfficial(market);
-    const ref = decidingPrice(market, price);
+    const ref = price;
     el.heroPrice.textContent = price === null ? '—' : fmtPrice(price, d);
     const chg = market.change24h ?? null;
     el.assetChange.textContent = `${fmtChange(chg)} 24h`;
@@ -467,15 +471,8 @@ export function startApp() {
 
   // Live mode: what a bet and a later claim cost in network fees, from typical gas and the live gas price.
   // Shown before betting, with a warning when fees are a large share of the stake (SEC-26).
+  // The gas price is pushed by the relay whenever the chain's base fee changes (no polling)
   let gasPriceWei = null;
-  async function refreshGasPrice() {
-    try {
-      gasPriceWei = (await web3.readOnlyProvider.getFeeData()).gasPrice;
-    } catch (_) {
-      gasPriceWei = null;
-    }
-  }
-  setInterval(refreshGasPrice, 30000);
 
   function paintFee(stake) {
     const node = $('stake-fee');
@@ -589,7 +586,7 @@ export function startApp() {
   }
 
   function paintPositionChip(market, chartPrice) {
-    const price = decidingPrice(market, chartPrice);
+    const price = chartPrice;
     const mine = activePositionsForMarket();
     const wasHidden = el.positionChip.classList.contains('hidden');
     if (!mine.length) {
@@ -617,11 +614,11 @@ export function startApp() {
       return;
     }
     if (price === null) {
-      el.positionText.textContent = `${fmtMon(stake)} MON on ${sideName(side)} · waiting for the official price`;
+      el.positionText.textContent = `${fmtMon(stake)} MON on ${sideName(side)} · waiting for the price feed`;
       return;
     }
-    if (price === market.lockPrice) {
-      el.positionText.textContent = `Level with the strike · ${fmtMon(stake)} MON at stake`;
+    if (closeCall(price, market.lockPrice)) {
+      el.positionText.textContent = `Too close to call · ${fmtMon(stake)} MON at stake`;
       return;
     }
     const winning = side === 'UP' ? price > market.lockPrice : price < market.lockPrice;
@@ -772,7 +769,7 @@ export function startApp() {
   // Settlement moment
   // ---------------------------------------------------------------------------
   let resultTimer = null;
-  function showResult({ marketKey, roundId, winner, lockPrice, closePrice }) {
+  function showResult({ marketKey, roundId, winner, lockPrice, closePrice, confirming = false }) {
     const m = amm.markets[marketKey];
     const mine = positionsList().filter((p) => p.marketKey === marketKey && p.roundId === roundId);
     const kind = winner === 'UP' ? 'up' : winner === 'DOWN' ? 'down' : 'neutral';
@@ -798,12 +795,17 @@ export function startApp() {
       el.resultSub.textContent = 'All stakes refunded';
     }
 
+    // Read from RedStone's signed close report and verified here; the settle transaction follows
+    el.resultState.textContent = confirming ? 'Official price, signed by RedStone · confirming on-chain…' : 'Settled on-chain';
+    el.resultState.className = `result-state${confirming ? ' pending' : ''}`;
+
     // Restart the CSS animation
     el.result.className = `result ${kind}`;
     void el.result.offsetWidth;
     el.result.classList.remove('hidden');
     clearTimeout(resultTimer);
-    resultTimer = setTimeout(() => el.result.classList.add('hidden'), 3200);
+    // An early result stays up until the chain confirms it (at most 20 s)
+    resultTimer = setTimeout(() => el.result.classList.add('hidden'), confirming ? 20000 : 3200);
     engine.flashSettlement(winner);
     const youWon = mine.some((p) => (winner === 'UP' || winner === 'DOWN') && p.side === winner);
     engine.celebrate(winner, youWon ? 1.4 : (winner === 'UP' || winner === 'DOWN') ? 0.6 : 0.3);
@@ -826,12 +828,6 @@ export function startApp() {
         }
       }
       paintTickers(allMarkets);
-    },
-
-    official: ({ market }) => {
-      if (market !== amm.getActiveMarket()) return;
-      paintReadout(market, market.price);
-      paintPositionChip(market, market.price);
     },
 
     feedStatus: ({ status, latency, isConnected, source }) => {
@@ -1072,6 +1068,8 @@ export function startApp() {
     closed: { label: 'Bets closed', verb: 'strike in', bets: false },
     locked: { label: 'Strike locked', verb: 'settles in', bets: false },
     settling: { label: 'Settling', verb: 'waiting for the keeper', bets: false },
+    confirming: { label: 'Confirming price', verb: 'final in', bets: false },
+    expired: { label: 'Refundable', verb: 'unresolved in time, stakes refundable', bets: false },
     ended: { label: 'Round ended', verb: '', bets: false }
   };
 
@@ -1100,7 +1098,7 @@ export function startApp() {
 
     const ph = LIVE_PHASES[st.phase];
     const now = Date.now();
-    const until = st.phase === 'open' ? st.betCloseAt : st.phase === 'closed' ? st.lockAt : st.phase === 'locked' ? st.closeAt : null;
+    const until = st.phase === 'open' ? st.betCloseAt : st.phase === 'closed' ? st.lockAt : st.phase === 'locked' ? st.closeAt : st.phase === 'confirming' ? st.finalizeAt : null;
     const left = until ? Math.max(0, (until - now) / 1000) : null;
     el.console.classList.toggle('locked', !ph.bets);
     el.console.classList.toggle('closing', st.phase === 'open' && left <= 5);
@@ -1110,8 +1108,11 @@ export function startApp() {
     el.betUp.disabled = !canBet;
     el.betDown.disabled = !canBet;
     el.phaseLabel.textContent = st.phase === 'open' && left <= 5 ? 'Closing' : ph.label;
+    const preview = st.phase === 'idle' ? projectedRound(m.roundDuration, now) : null;
     el.phaseTime.innerHTML = st.phase === 'idle'
-      ? '<span class="phase-verb">your bet opens a new round</span>'
+      ? (preview
+        ? `<span class="phase-verb">bet now · strike </span>${fmtClock((preview.lockAt - now) / 1000)}<span class="phase-verb"> · result </span>${fmtClock((preview.closeAt - now) / 1000)}`
+        : '<span class="phase-verb">your bet opens a new round</span>')
       : `<span class="phase-verb">${ph.verb} </span>${left === null ? '' : fmtClock(left)}`;
     const span = st.phase === 'open' ? (st.betCloseAt - (st.lockAt - m.roundDuration * 1000)) / 1000 : m.roundDuration;
     el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - (left === null ? 0 : Math.min(1, left / Math.max(1, span))))}`;
@@ -1125,15 +1126,33 @@ export function startApp() {
     renderLedgerIfChanged();
   }
 
-  // The countdown ticks locally between contract reads (no extra network requests)
-  setInterval(() => { if (liveRounds?.state) applyLive(liveRounds.state); }, 500);
+  // The countdown and phase move with the local clock between contract events (no network requests)
+  setInterval(() => {
+    liveRounds?.tick();
+    if (liveRounds?.state) applyLive(liveRounds.state);
+  }, 500);
 
-  refreshGasPrice();
+  history.onGas((wei) => {
+    gasPriceWei = wei;
+    if (liveRounds?.state) applyLive(liveRounds.state);
+  });
 
   liveRounds = new LiveRounds({
     web3,
     history,
     onUpdate: applyLive,
+    onRoundConfirmed: ({ matches, ...data }) => {
+      if (!matches) {
+        // Never expected (same signed data), but the chain decides: show its result
+        showResult(data);
+        el.resultState.textContent = 'Settled on-chain (differs from the early reading)';
+        return;
+      }
+      el.resultState.textContent = 'Settled on-chain ✓';
+      el.resultState.className = 'result-state';
+      clearTimeout(resultTimer);
+      resultTimer = setTimeout(() => el.result.classList.add('hidden'), 2500);
+    },
     onRoundEnd: (data) => {
       showResult(data);
       paintRecent();
@@ -1171,8 +1190,6 @@ export function startApp() {
     b.classList.add('unavailable');
     b.title = reason;
   });
-  $('official-cell').classList.toggle('hidden', !splitFeeds);
-  setInterval(() => paintOfficial(amm.getActiveMarket()), 1000);
   el.networkBadge.textContent = getConfig().name;
   if (!getConfig().contractAddress) {
     toast('No contract configured', 'Set NEXT_PUBLIC_CONTRACT_ADDRESS (see .env.example).', { error: true, sticky: true });
@@ -1181,7 +1198,6 @@ export function startApp() {
   history.start();
   pulse.refresh();
   amm.emit('marketChanged', amm.getActiveMarket());
-  refreshGasPrice();
   renderLedger();
   updateSafeArea();
   engine.start();

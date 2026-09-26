@@ -17,8 +17,8 @@ import { ethers } from 'ethers';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ENVIRONMENTS, SUPPORTED_MARKETS } from '../src/config.js';
-import { REDSTONE_PRIMARY_SIGNERS, feedIdBytes32, fetchLatestReports } from '../src/oracle.js';
+import { ENVIRONMENTS, SUPPORTED_MARKETS, TYPICAL_GAS } from '../src/config.js';
+import { REDSTONE_PRIMARY_SIGNERS, feedIdBytes32, fetchLatestReports, fetchReportsAt } from '../src/oracle.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,7 +48,16 @@ async function deploy() {
   // testnet); 4 tolerates one missing node, and the keeper's choice of which 4 moves the median only
   // within the spread between the nodes' values.
   const threshold = 4;
-
+  // SEC-11: network fees to bet and claim must stay a small share of the smallest bet. minBet is set so
+  // that at the gas price at deploy time they are at most MAX_FEE_SHARE of it (owner can re-tune later
+  // with setProtocolParameters as gas prices move).
+  const MAX_FEE_SHARE = 0.05;
+  const minBetFor = (gasPrice) => {
+    const feeWei = (BigInt(TYPICAL_GAS.bet + TYPICAL_GAS.claim) * gasPrice * 110n) / 100n;
+    const raw = (feeWei * 100n) / BigInt(MAX_FEE_SHARE * 100);
+    const step = 10n ** 16n; // round up to 0.01 MON
+    return ((raw + step - 1n) / step) * step;
+  };
   console.log(`[1] Selected Target Environment: ${config.name}`);
   console.log(`    Chain ID: ${config.chainId} (${config.chainIdHex})`);
   console.log(`    RPC Endpoint: ${config.rpcUrl}`);
@@ -94,6 +103,14 @@ async function deploy() {
       if (latest[feed].length < threshold) throw new Error(`RedStone: only ${latest[feed].length} of ${signers.length} signed ${feed} reports right now (need ${threshold}).`);
     }
     console.log(`    [OK] RedStone gateway: at least ${threshold} of ${signers.length} signers currently sign ${feeds.join(', ')}`);
+    const past = (Math.floor(Date.now() / 10000) * 10000) - 3600e3;
+    const hist = await fetchReportsAt(feeds, past, { signers });
+    for (const feed of feeds) {
+      if (hist[feed].length < threshold) throw new Error(`RedStone history: only ${hist[feed].length} signed ${feed} reports for ${past / 1000} (need ${threshold}).`);
+    }
+    console.log(`    [OK] RedStone history: complete reports for an hour ago (${past / 1000}); the keeper can settle any round of the last 24 h`);
+    const gasPrice = (await provider.getFeeData()).gasPrice;
+    console.log(`    [OK] Gas price ${ethers.formatUnits(gasPrice, 'gwei')} gwei -> minBet ${ethers.formatEther(minBetFor(gasPrice))} MON (fees <= ${MAX_FEE_SHARE * 100}% of the smallest bet)`);
     const factory = new ethers.ContractFactory(abi, bytecode);
     const deployTx = await factory.getDeployTransaction(signers, threshold);
     const gas = await provider.estimateGas(deployTx);
@@ -127,6 +144,12 @@ async function deploy() {
   await contract.waitForDeployment();
   const deployedAddress = await contract.getAddress();
   console.log(`    [SUCCESS] MonadUpDownAMM Deployed to: ${deployedAddress}`);
+
+  const gasPrice = (await provider.getFeeData()).gasPrice;
+  const minBet = minBetFor(gasPrice);
+  const [lockBuffer, priceWindow, timeout] = await Promise.all([contract.lockBufferSeconds(), contract.priceWindowSeconds(), contract.emergencyTimeout()]);
+  await (await contract.setProtocolParameters(lockBuffer, priceWindow, timeout, minBet)).wait();
+  console.log(`    [OK] minBet ${ethers.formatEther(minBet)} MON at ${ethers.formatUnits(gasPrice, 'gwei')} gwei (SEC-11)`);
 
   console.log('\n[6] Initializing Canonical Multi-Markets On-Chain...');
   for (const [key, m] of Object.entries(SUPPORTED_MARKETS)) {

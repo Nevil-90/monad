@@ -2,7 +2,6 @@
  * MarketState.js
  * The markets as the UI shows them, from real sources only:
  *   - price, ticks, 24h change: the live price feed (checked by CircuitBreaker)
- *   - official: RedStone's signed price, the one the contract settles on
  *   - roundId, pools, bettors, strike, fee: the active market's current on-chain round, written in
  *     by main.js from LiveRounds
  * Nothing is simulated or preset: until real data arrives a field is null (or zero for pools),
@@ -31,7 +30,6 @@ export class MarketState {
         price: null,
         ticks: [],
         change24h: null,
-        official: null,
         roundId: null,
         poolUp: 0,
         poolDown: 0,
@@ -49,8 +47,7 @@ export class MarketState {
     if (!skipFeed) {
       this.feed = new LivePriceFeed(
         (tick) => this.handleLiveTick(tick),
-        (status) => this.emit('feedStatus', status),
-        (marketKey, price, time) => this.handleOfficialPrice(marketKey, price, time)
+        (status) => this.emit('feedStatus', status)
       );
     }
   }
@@ -74,13 +71,6 @@ export class MarketState {
       allMarkets: this.markets,
       vol: vol || 0
     });
-  }
-
-  handleOfficialPrice(marketKey, price, time) {
-    const m = this.markets[marketKey];
-    if (!m) return;
-    m.official = { price, time };
-    this.emit('official', { marketKey, market: m });
   }
 
   getActiveMarket() {

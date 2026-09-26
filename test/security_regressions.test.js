@@ -144,9 +144,12 @@ async function main() {
     const knownBeforeBetsClosed = reportsAtTs(6000000000000n, lockTs - 20n);
     check('SEC-02', await reverts(() => amm.connect(keeper).lockRoundWithUpdate.staticCall(m, rId, knownBeforeBetsClosed), 'Report not at pinned timestamp'),
       'Lock reports from before lockTimestamp (already known to bettors) are rejected');
-    const notFirst = reportsAtTs(7000000000000n, lockTs + 10n);
-    check('SEC-02', await reverts(() => amm.connect(keeper).lockRoundWithUpdate.staticCall(m, rId, notFirst), 'Report not at pinned timestamp'),
-      'Reports from the next 10s mark are rejected: only the first mark at/after lockTimestamp counts');
+    const tooLate = reportsAtTs(7000000000000n, lockTs + 40n);
+    check('SEC-02', await reverts(() => amm.connect(keeper).lockRoundWithUpdate.staticCall(m, rId, tooLate), 'Report not at pinned timestamp'),
+      'Reports more than maxReportDelay (30 s) after the pinned mark are rejected');
+    const offGrid = reportsAtTs(7000000000000n, lockTs + 5n);
+    check('SEC-02', await reverts(() => amm.connect(keeper).lockRoundWithUpdate.staticCall(m, rId, offGrid), 'Report not at pinned timestamp'),
+      'Report times off the 10 s grid are rejected');
     const mixed = [...firstAt(6425000000000n, round.lockTimestamp).slice(0, 4), ...reportsAtTs(7000000000000n, lockTs + 10n, { keys: [signerKeys[4]] })];
     check('SEC-02', await reverts(() => amm.connect(keeper).lockRoundWithUpdate.staticCall(m, rId, mixed), 'Report not at pinned timestamp'),
       'Mixing in one report from another timestamp is rejected');
@@ -166,8 +169,127 @@ async function main() {
 
     await warpTo(r.closeTimestamp + 30n);
     const laterFavourable = reportsAtTs(9000000000000n, pinned(r.closeTimestamp) + 10n);
-    check('SEC-02', await reverts(() => amm.connect(settler).settleRoundWithUpdate.staticCall(m, rId, laterFavourable), 'Report not at pinned timestamp'),
-      'Settler cannot substitute a later, more favourable close price');
+    await (await amm.connect(settler).settleRoundWithUpdate(m, rId, laterFavourable)).wait();
+    check('SEC-02', Number((await amm.rounds(m, rId)).status) === 2,
+      'A later close report is only proposed: the round does not settle on it (SEC-28 challenge period)');
+    await (await amm.connect(keeper).settleRoundWithUpdate(m, rId, firstAt(6300000000000n, r.closeTimestamp))).wait();
+    const done = await amm.rounds(m, rId);
+    check('SEC-02', Number(done.status) === 3 && done.closePrice === 6300000000000n * 10n ** 28n && Number(done.winningSide) === 2,
+      'The pinned report replaces the later, favourable one and settles at once: the settler gained nothing');
+  });
+
+  // ---------------------------------------------------------------------------
+  // SEC-28: The free gateway misses some report times. A later report settles only after a
+  // challenge period in which anyone can replace it with an earlier one.
+  // ---------------------------------------------------------------------------
+  await section('SEC-28', async () => {
+    const m = await newMarket();
+    const { rId, round } = await contestedRound(m);
+    const L = pinned(round.lockTimestamp);
+    const C = pinned(round.closeTimestamp);
+    check('SEC-28', L === round.lockTimestamp && C === round.closeTimestamp,
+      'Lock and close times sit on the 10 s report grid: the settling report is the one signed at close (no extra wait)');
+    await warpTo(round.lockTimestamp + 25n);
+    // Pinned lock report missed by everyone: the keeper locks on the report 20 s later
+    await (await amm.connect(keeper).lockRoundWithUpdate(m, rId, reportsAtTs(6400000000000n, L + 20n))).wait();
+    let r = await amm.rounds(m, rId);
+    check('SEC-28', Number(r.status) === 2 && r.lockPublishTime === L + 20n && r.finalizeAfter > 0n,
+      'Missing pinned lock report: a report within 30 s locks provisionally and opens a challenge period');
+    check('SEC-28', await reverts(() => amm.connect(stranger).lockRoundWithUpdate.staticCall(m, rId, reportsAtTs(6500000000000n, L + 30n)), 'Not earlier than the current lock report'),
+      'A later lock report cannot replace the current one');
+    await (await amm.connect(stranger).lockRoundWithUpdate(m, rId, reportsAtTs(6410000000000n, L + 10n))).wait();
+    r = await amm.rounds(m, rId);
+    check('SEC-28', r.lockPublishTime === L + 10n && r.lockPrice === 6410000000000n * 10n ** 28n && r.lockKeeper === await stranger.getAddress(),
+      'Anyone can replace it with an earlier captured report, and takes the lock bounty');
+
+    await warpTo(round.closeTimestamp + 25n);
+    await (await amm.connect(settler).settleRoundWithUpdate(m, rId, reportsAtTs(6300000000000n, C + 10n))).wait();
+    r = await amm.rounds(m, rId);
+    check('SEC-28', Number(r.status) === 2 && r.closePublishTime === C + 10n,
+      'A late close report is proposed, not settled');
+    check('SEC-28', await reverts(() => amm.connect(settler).finalizeRound.staticCall(m, rId), 'Challenge period not over'),
+      'Nobody can settle on it before the challenge period ends');
+    check('SEC-28', await reverts(() => amm.connect(alice).settleRoundWithUpdate.staticCall(m, rId, reportsAtTs(6600000000000n, C + 20n)), 'Not earlier than the current close report'),
+      'A later close report cannot replace the proposed one');
+    await warpTo(r.finalizeAfter);
+    const settlerAddr = await settler.getAddress();
+    const before = await amm.keeperRewards(settlerAddr);
+    await (await amm.connect(settler).finalizeRound(m, rId)).wait();
+    r = await amm.rounds(m, rId);
+    check('SEC-28', Number(r.status) === 3 && Number(r.winningSide) === 2 && r.closePrice === 6300000000000n * 10n ** 28n,
+      'After the challenge period the earliest captured report settles the round');
+    check('SEC-28', (await amm.keeperRewards(settlerAddr)) > before, 'The finalizer is paid the settle bounty');
+    check('SEC-28', await reverts(() => amm.connect(settler).finalizeRound.staticCall(m, rId), 'No proposed close price'),
+      'A settled round cannot be finalized twice');
+    check('SEC-28', await reverts(() => amm.connect(stranger).lockRoundWithUpdate.staticCall(m, rId, reportsAtTs(1n, L)), 'Not open'),
+      'The lock price cannot change after settlement');
+  });
+
+  // ---------------------------------------------------------------------------
+  // SEC-16: The owner key is a single point of trust. Whatever it does mid-round, it cannot take or
+  // reduce what bettors are owed: fees and timing are snapshotted, pause never blocks resolution or
+  // claims, treasury withdrawals only touch fees, and oracle signers are timelocked (SEC-22).
+  // ---------------------------------------------------------------------------
+  await section('SEC-16', async () => {
+    const m = await newMarket();
+    const { rId, round } = await contestedRound(m);
+    const originalTimeout = await amm.emergencyTimeout();
+    const aliceAddr = await alice.getAddress();
+    // Every owner power at once, mid-round
+    await (await amm.connect(owner).setProtocolFees(300, 300, 400)).wait();          // 10% total
+    await (await amm.connect(owner).setProtocolParameters(60, 60, 300, ethers.parseEther('5'))).wait();
+    await (await amm.connect(owner).setPaused(true)).wait();
+    await (await amm.connect(owner).setMarketActive(m, false)).wait();
+    await lockAt(m, rId, 6425000000000n);
+    await warpTo(round.closeTimestamp);
+    await (await amm.connect(settler).settleRoundWithUpdate(m, rId, firstAt(6500000000000n, round.closeTimestamp))).wait();
+    const r = await amm.rounds(m, rId);
+    check('SEC-16', Number(r.status) === 3 && r.feeBps === 150n, 'Round settles at the fee it opened with (1.5%), not the owner\'s new 10%');
+    const expected = (ethers.parseEther('10') * r.netPayoutPool) / r.totalUp;
+    const before = BigInt(await provider.send('eth_getBalance', [aliceAddr, 'latest']));
+    const rc = await (await amm.connect(alice).claimPayout(m, rId)).wait();
+    const got = BigInt(await provider.send('eth_getBalance', [aliceAddr, 'latest'])) - before + rc.fee;
+    check('SEC-16', got === expected && expected === ethers.parseEther('19.7'), `Winner is paid in full while paused and deactivated: ${ethers.formatEther(got)} MON`);
+    const ownerAddr = await owner.getAddress();
+    check('SEC-16', await reverts(() => amm.connect(owner).withdrawTreasury.staticCall(ethers.ZeroHash, ownerAddr), 'No treasury fees'),
+      'The owner can only withdraw accrued fees, never pool money');
+    // Restore for the sections that follow
+    await (await amm.connect(owner).setPaused(false)).wait();
+    await (await amm.connect(owner).setProtocolFees(10, 10, 130)).wait();
+    await (await amm.connect(owner).setProtocolParameters(10, 10, originalTimeout, ethers.parseEther('0.001'))).wait();
+  });
+
+  // ---------------------------------------------------------------------------
+  // SEC-29: A timed-out round was refundable AND still settleable: a loser refunded, then the
+  // round settled and winners were paid out of the refunded stake (i.e. other rounds' money)
+  // ---------------------------------------------------------------------------
+  await section('SEC-29', async () => {
+    const m = await newMarket();
+    const { rId, round } = await contestedRound(m);
+    await lockAt(m, rId, 6425000000000n);
+    const r = await amm.rounds(m, rId);
+    check('SEC-29', r.expiryTimestamp === r.closeTimestamp + (await amm.emergencyTimeout()), 'Expiry (close + emergencyTimeout) is fixed at round start');
+    await warpTo(r.expiryTimestamp + 1n);
+    await (await amm.connect(bob).claimPayout(m, rId)).wait(); // Bob refunds his losing stake
+    check('SEC-29', await reverts(() => amm.connect(settler).settleRoundWithUpdate.staticCall(m, rId, firstAt(6000000000000n, round.closeTimestamp)), 'Round expired: refundable'),
+      'Once refundable, the round can no longer be settled (no payout from refunded stakes)');
+    check('SEC-29', await reverts(() => amm.connect(settler).lockRoundWithUpdate.staticCall(m, rId, firstAt(6000000000000n, round.lockTimestamp)), 'Round expired: refundable'),
+      'Nor can its lock price change');
+    const got = await amm.connect(alice).claimPayout.staticCall(m, rId).then(() => true, () => false);
+    check('SEC-29', got, 'Every bettor still refunds their stake');
+
+    // Owner cannot change an in-flight round's expiry
+    const originalTimeout = await amm.emergencyTimeout();
+    const m2 = await newMarket();
+    const { rId: rId2 } = await contestedRound(m2);
+    const locked2 = await lockAt(m2, rId2, 6425000000000n);
+    await (await amm.connect(owner).setProtocolParameters(10, 10, 300, ethers.parseEther('0.001'))).wait();
+    check('SEC-29', (await amm.rounds(m2, rId2)).expiryTimestamp === locked2.expiryTimestamp,
+      'Lowering emergencyTimeout does not change an in-flight round\'s expiry');
+    await warpTo(locked2.closeTimestamp + 400n);
+    check('SEC-29', await reverts(() => amm.connect(bob).claimPayout.staticCall(m2, rId2), 'Round not yet resolved'),
+      'After lowering the timeout to 5 min, a round 400 s past close is still not refundable (owner cannot trigger refunds)');
+    await (await amm.connect(owner).setProtocolParameters(10, 10, originalTimeout, ethers.parseEther('0.001'))).wait();
   });
 
   // ---------------------------------------------------------------------------
@@ -207,10 +329,10 @@ async function main() {
     await (await amm.connect(keeper).lockRoundWithUpdate(m, rId, firstAt(6425000000000n, round.lockTimestamp))).wait();
     check('SEC-04', Number((await amm.rounds(m, rId)).status) === 2, 'Lock 200s late still locks at the pinned price (no forced cancel)');
 
-    await warpTo(round.closeTimestamp + 600n); // old maxSettleDelay was 120s
+    await warpTo(round.closeTimestamp + 500n); // old maxSettleDelay was 120s; expiry is close + 600s (SEC-29)
     await (await amm.connect(settler).settleRoundWithUpdate(m, rId, firstAt(6300000000000n, round.closeTimestamp))).wait();
     const r = await amm.rounds(m, rId);
-    check('SEC-04', Number(r.status) === 3 && Number(r.winningSide) === 2, 'Settle 600s late still settles with the correct winner (DOWN)');
+    check('SEC-04', Number(r.status) === 3 && Number(r.winningSide) === 2, 'Settle 500s late still settles with the correct winner (DOWN)');
   });
 
   // ---------------------------------------------------------------------------

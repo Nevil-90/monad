@@ -1,85 +1,54 @@
 /**
  * scripts/price_relay.js
- * RedStone price relay for the browser. No API key: it reads RedStone's free public gateway.
+ * The app's relay. Nothing in it polls:
  *
- * The gateway returns every feed it carries (about 2 MB, 420 KB compressed) every time and cannot be
- * filtered, which is too heavy for every browser to poll. This relay polls it once, keeps only the
- * markets' feeds, checks every signature, and serves:
+ *   GET /events/stream?after=BLOCK Server-Sent Events: the AMM contract's event logs after BLOCK, then
+ *                                  new events, block height and gas price pushed as Monad's WebSocket
+ *                                  delivers them. The Dashboard, round view and fee display run on it.
+ *   GET /events?after=BLOCK        The same backlog as one JSON response
+ *   GET /reports?feed=BTC&ts=SEC   Signed RedStone reports for that report time, ready for
+ *                                  lockRoundWithUpdate / settleRoundWithUpdate (fetched once from the
+ *                                  gateway's 24 h history and cached), so anyone can lock or settle
+ *   GET /health                    Stream, index and report-lookup status
  *
- *   GET /stream                    Server-Sent Events: a snapshot, then { feed, p, t } on each new report
- *   GET /history?feed=BTC          Recent prices [[tsMs, price], ...] (10s apart, up to 24h)
- *   GET /reports?feed=BTC&ts=SEC   The signed reports for that timestamp, ready for lockRoundWithUpdate /
- *                                  settleRoundWithUpdate. The gateway has no past reports; this archive does.
- *   GET /events?after=BLOCK        The AMM contract's event logs after BLOCK, for the Dashboard (indexed
- *                                  here because Monad RPCs serve at most 100 blocks per log request)
- *   GET /events/stream?after=BLOCK Server-Sent Events: the same backlog, then new events pushed as
- *                                  blocks are indexed (no polling)
- *   GET /health                    Gateway and index status
- *
- * Prices are the median of all signers, exactly as the contract computes them.
+ * Why a relay at all: Monad RPCs serve at most 100 blocks per log request, too slow for every browser
+ * to scan the contract's history, and RedStone's history responses are ~2 MB (every feed it carries).
  *
  * Usage:  npm run relay        (then NEXT_PUBLIC_PRICE_RELAY_URL=http://localhost:8787 for the app)
- * Env:    PORT (8787), ALLOWED_ORIGIN (* by default; set to your site's origin in production)
+ * Env:    PORT (8787), ALLOWED_ORIGIN (required in production: your site's origin, e.g. https://app.example)
  */
 
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { SUPPORTED_MARKETS, getConfig } from '../src/config.js';
-import { ReportArchive } from './lib/report_archive.js';
+import { ethers } from 'ethers';
+import { AMM_ABI } from '../src/contracts/AMMAbi.js';
+import { MonadRpcProvider } from '../src/rpc.js';
+import { ReportSource } from './lib/report_source.js';
 import { EventIndex } from './lib/event_index.js';
 
 const PORT = Number(process.env.PORT || 8787);
+const production = process.env.NODE_ENV === 'production';
+if (production && !process.env.ALLOWED_ORIGIN) {
+  console.error('[relay] ALLOWED_ORIGIN must be set in production (the app\'s origin), not left open to every site.');
+  process.exit(1);
+}
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
-const DAY = 24 * 3600e3;
+const HEARTBEAT_MS = 15000; // keeps idle SSE connections open through proxies; carries no data
 
 const feeds = Object.values(SUPPORTED_MARKETS).map((m) => m.feed);
-const clients = new Set();
-const latest = new Map(); // feed -> { p, t }
-
-function broadcast(msg) {
-  const line = `data: ${JSON.stringify(msg)}\n\n`;
-  for (const res of clients) res.write(line);
-}
-
-// 24h change from our own archive; unknown (null) until the relay has run for 24 hours
-function change24h(feed) {
-  const series = prices.series(feed);
-  const now = latest.get(feed);
-  if (!now || !series.length || series[0][0] > now.t - DAY + 60e3) return null;
-  let then = series[0];
-  for (const point of series) {
-    if (point[0] > now.t - DAY) break;
-    then = point;
-  }
-  return ((now.p - then[1]) / then[1]) * 100;
-}
-
-function snapshot() {
-  const out = {};
-  for (const [feed, v] of latest) out[feed] = { ...v, change24h: change24h(feed) };
-  return out;
-}
-
-const prices = new ReportArchive({
-  feeds,
-  keepMs: 2 * 3600e3,
-  seriesKeepMs: DAY,
-  onComplete: (feed, t, p) => {
-    const prev = latest.get(feed);
-    if (prev && prev.t >= t) return;
-    latest.set(feed, { p, t });
-    broadcast({ feed, p, t });
-  }
-});
-prices.start();
-
-// Contract event index for the Dashboard; needs the deployed contract in .env
 const net = getConfig();
 let events = null;
+let reportSource = null;
 if (net.contractAddress && net.deployBlock !== null) {
+  // Serve reports for the contract's own signer set and threshold (read once)
+  const amm = new ethers.Contract(net.contractAddress, AMM_ABI, new MonadRpcProvider(net.rpcUrl, net.chainId));
+  const [signers, threshold] = await Promise.all([amm.oracleSigners(), amm.signerThreshold()]);
+  reportSource = new ReportSource({ feeds, signers, threshold: Number(threshold) });
   events = new EventIndex({
     rpcUrl: net.rpcUrl,
+    wsUrl: net.wsUrl,
     chainId: net.chainId,
     address: net.contractAddress,
     fromBlock: net.deployBlock,
@@ -90,39 +59,33 @@ if (net.contractAddress && net.deployBlock !== null) {
   console.log('[relay] no contract in .env (NEXT_PUBLIC_CONTRACT_ADDRESS / _DEPLOY_BLOCK): /events disabled');
 }
 
+const json = (v) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? x.toString() : x));
 function send(res, code, body) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
+  res.end(json(body));
 }
 
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.method !== 'GET') {
+    res.writeHead(405);
+    return res.end();
+  }
   const url = new URL(req.url, `http://${req.headers.host}`);
   const feed = url.searchParams.get('feed');
 
-  if (url.pathname === '/stream') {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
-    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`);
-    clients.add(res);
-    const heartbeat = setInterval(() => res.write(`event: stats\ndata: ${JSON.stringify(snapshot())}\n\n`), 15000);
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      clients.delete(res);
-    });
-    return;
-  }
-
-  if (url.pathname === '/history') {
-    if (!feeds.includes(feed)) return send(res, 404, { error: 'unknown feed' });
-    return send(res, 200, prices.series(feed));
-  }
-
   if (url.pathname === '/reports') {
+    if (!reportSource) return send(res, 503, { error: 'This relay has no contract configured (NEXT_PUBLIC_CONTRACT_ADDRESS).' });
     if (!feeds.includes(feed)) return send(res, 404, { error: 'unknown feed' });
-    const reports = prices.reportsAt(feed, url.searchParams.get('ts'));
-    if (!reports) return send(res, 404, { error: `only ${prices.countAt(feed, url.searchParams.get('ts'))} of ${prices.threshold} signatures captured for that timestamp` });
-    return send(res, 200, reports);
+    const ts = Number(url.searchParams.get('ts'));
+    if (!Number.isInteger(ts) || ts % 10 !== 0) return send(res, 400, { error: 'ts must be a report time in seconds (multiple of 10)' });
+    reportSource.reportsAt(feed, ts).then((reports) => {
+      if (!reports) return send(res, 404, { error: `no complete set of signed reports for ${feed} at ${ts} (not published yet, or older than 24 h)` });
+      send(res, 200, reports);
+    }, (err) => send(res, 502, { error: err.message }));
+    return;
   }
 
   if (url.pathname === '/events/stream') {
@@ -130,12 +93,15 @@ const server = http.createServer((req, res) => {
     const after = Number(url.searchParams.get('after'));
     if (!Number.isFinite(after)) return send(res, 400, { error: 'after must be a block number' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
-    const push = (body) => res.write(`data: ${JSON.stringify(body)}\n\n`);
-    push(events.since(after));
-    // New events as they are indexed; an empty push still advances the head (the "Live · block" figure)
-    const onIndexed = (logs, head) => push({ address: events.address, head, logs });
+    const push = (body) => res.write(`data: ${json(body)}\n\n`);
+    push({ ...events.since(after), gasPrice: events.gasPrice });
+    const onIndexed = ({ logs, head, gasPrice }) => push({ address: events.address, head, logs, gasPrice });
     events.subscribers.add(onIndexed);
-    req.on('close', () => events.subscribers.delete(onIndexed));
+    const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), HEARTBEAT_MS);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      events.subscribers.delete(onIndexed);
+    });
     return;
   }
 
@@ -147,12 +113,13 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.pathname === '/health') {
-    return send(res, 200, {
-      gateway: prices.status,
-      events: events ? { ...events.status, head: events.head, count: events.logs.length } : null,
-      feeds,
-      clients: clients.size,
-      latest: snapshot()
+    const ok = Boolean(events?.stream?.status.connected && events.status.ok);
+    return send(res, ok ? 200 : 503, {
+      ok,
+      stream: events?.stream?.status ?? null,
+      events: events ? { ...events.status, head: events.head, count: events.logs.length, subscribers: events.subscribers.size } : null,
+      gasPrice: events?.gasPrice ?? null,
+      reports: reportSource?.stats ?? null
     });
   }
 
@@ -160,4 +127,4 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 
-server.listen(PORT, () => console.log(`[relay] listening on http://localhost:${PORT}, feeds: ${feeds.join(', ')}`));
+server.listen(PORT, () => console.log(`[relay] listening on http://localhost:${PORT}`));

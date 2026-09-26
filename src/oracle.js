@@ -5,13 +5,15 @@
  *
  *   dataFeedId (bytes32) | value (uint256, 8 decimals) | timestampMs (6 bytes) | 32 (4 bytes) | 1 (3 bytes)
  *
- * The free gateway serves only the latest reports (one set every 10 seconds), not past ones, so
- * whoever locks or settles a round must capture the report for its timestamp when it is published.
+ * Reports are published every 10 seconds. Gateway 1 serves only the latest set; gateway 2 also serves
+ * any past set of the last 24 hours by exact timestamp (fetchReportsAt), so the report for a round's
+ * pinned time can be fetched after the fact instead of having to be caught live (SEC-28).
  */
 
 import { ethers } from 'ethers';
 
 export const REDSTONE_GATEWAY = 'https://oracle-gateway-1.a.redstone.finance';
+export const REDSTONE_HISTORY_GATEWAY = 'https://oracle-gateway-2.a.redstone.finance';
 export const REDSTONE_DATA_SERVICE = 'redstone-primary-prod';
 
 // Authorised nodes of redstone-primary-prod (checked 2026-09-26). The deployed contract requires 4 of
@@ -79,6 +81,30 @@ export async function fetchLatestReports(feeds, { signers = REDSTONE_PRIMARY_SIG
     out[feed] = (body[feed] || [])
       .map((pkg) => { try { return parsePackage(pkg); } catch (_) { return null; } })
       .filter((p) => p && p.feed === feed && allowed.has(p.signer.toLowerCase()));
+  }
+  return out;
+}
+
+/**
+ * Signed reports for the given feeds at exactly `timestampMs`, from the gateway's history
+ * (checked 2026-09-26: oracle-gateway-2 serves every 10 s report of the last 24 h, all signers, no key;
+ * gateway-1 serves only the latest). Returns { BTC: [{ feed, signer, report }], ... }, keeping only
+ * packages signed by an authorised signer for that exact timestamp. Throws if the gateway fails.
+ */
+export async function fetchReportsAt(feeds, timestampMs, { signers = REDSTONE_PRIMARY_SIGNERS, fetchImpl = fetch, timeoutMs = 15000, fresh = null } = {}) {
+  const ts = BigInt(timestampMs);
+  // `fresh`: a retry key, so a retry is not answered from the CDN's 5 s cache of an incomplete set
+  const query = fresh === null ? '' : `?r=${encodeURIComponent(fresh)}`;
+  const res = await fetchImpl(`${REDSTONE_HISTORY_GATEWAY}/v2/data-packages/historical/${REDSTONE_DATA_SERVICE}/${ts}${query}`,
+    { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`RedStone history ${res.status} ${res.statusText}`);
+  const body = await res.json();
+  const allowed = new Set(signers.map((a) => a.toLowerCase()));
+  const out = {};
+  for (const feed of feeds) {
+    out[feed] = (body[feed] || [])
+      .map((pkg) => { try { return parsePackage(pkg); } catch (_) { return null; } })
+      .filter((p) => p && p.feed === feed && p.report.timestampMs === ts && allowed.has(p.signer.toLowerCase()));
   }
   return out;
 }

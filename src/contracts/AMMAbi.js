@@ -64,6 +64,43 @@ export const AMM_ABI = [
       },
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "roundId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "closePrice",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "publishTime",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "finalizeAfter",
+        "type": "uint256"
+      }
+    ],
+    "name": "ClosePriceProposed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "marketId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "creator",
         "type": "address"
@@ -510,7 +547,33 @@ export const AMM_ABI = [
   },
   {
     "inputs": [],
+    "name": "CHALLENGE_PERIOD",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_ORACLE_SIGNERS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_REPORT_DELAY",
     "outputs": [
       {
         "internalType": "uint256",
@@ -859,6 +922,24 @@ export const AMM_ABI = [
         "type": "uint256"
       }
     ],
+    "name": "finalizeRound",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "marketId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "roundId",
+        "type": "uint256"
+      }
+    ],
     "name": "getLiveOdds",
     "outputs": [
       {
@@ -1007,39 +1088,54 @@ export const AMM_ABI = [
       {
         "components": [
           {
-            "internalType": "uint64",
+            "internalType": "uint32",
             "name": "roundId",
-            "type": "uint64"
+            "type": "uint32"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint40",
             "name": "startTimestamp",
-            "type": "uint64"
+            "type": "uint40"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint40",
             "name": "lockTimestamp",
-            "type": "uint64"
+            "type": "uint40"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint40",
             "name": "closeTimestamp",
-            "type": "uint64"
+            "type": "uint40"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint40",
             "name": "betCloseTimestamp",
-            "type": "uint64"
+            "type": "uint40"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint40",
+            "name": "expiryTimestamp",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "priceWindow",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint40",
             "name": "lockPublishTime",
-            "type": "uint64"
+            "type": "uint40"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint40",
             "name": "closePublishTime",
-            "type": "uint64"
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "finalizeAfter",
+            "type": "uint40"
           },
           {
             "internalType": "uint16",
@@ -1058,7 +1154,7 @@ export const AMM_ABI = [
           },
           {
             "internalType": "uint16",
-            "name": "priceWindow",
+            "name": "maxReportDelay",
             "type": "uint16"
           },
           {
@@ -1497,39 +1593,54 @@ export const AMM_ABI = [
     "name": "rounds",
     "outputs": [
       {
-        "internalType": "uint64",
+        "internalType": "uint32",
         "name": "roundId",
-        "type": "uint64"
+        "type": "uint32"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint40",
         "name": "startTimestamp",
-        "type": "uint64"
+        "type": "uint40"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint40",
         "name": "lockTimestamp",
-        "type": "uint64"
+        "type": "uint40"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint40",
         "name": "closeTimestamp",
-        "type": "uint64"
+        "type": "uint40"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint40",
         "name": "betCloseTimestamp",
-        "type": "uint64"
+        "type": "uint40"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint40",
+        "name": "expiryTimestamp",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint16",
+        "name": "priceWindow",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint40",
         "name": "lockPublishTime",
-        "type": "uint64"
+        "type": "uint40"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint40",
         "name": "closePublishTime",
-        "type": "uint64"
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "finalizeAfter",
+        "type": "uint40"
       },
       {
         "internalType": "uint16",
@@ -1548,7 +1659,7 @@ export const AMM_ABI = [
       },
       {
         "internalType": "uint16",
-        "name": "priceWindow",
+        "name": "maxReportDelay",
         "type": "uint16"
       },
       {

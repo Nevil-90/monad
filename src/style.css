@@ -324,6 +324,10 @@ button:disabled { cursor: not-allowed; }
 .result.up .result-title { color: var(--sun-hi); }
 .result.down .result-title { color: var(--tide-hi); }
 .result.neutral .result-title { color: var(--horizon); }
+.result-state { margin-top: 6px; font-family: var(--font-num); font-size: 11px; letter-spacing: 0.04em; color: var(--ink-3); text-shadow: 0 2px 16px var(--night-0); }
+.result-state.pending { animation: result-pending 1.2s ease-in-out infinite; }
+@keyframes result-pending { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .result-state.pending { animation: none; } }
 .result-sub { margin-top: 8px; font-size: 14px; font-weight: 600; color: var(--ink-2); text-shadow: 0 2px 16px var(--night-0); }
 @keyframes result-in {
   0% { opacity: 0; transform: translate(-50%, -40%) scale(0.96); }
@@ -1069,14 +1073,11 @@ select.dash-input { padding-right: 28px; }
 
 .link-btn { padding: 0; border: 0; background: none; color: var(--ink); font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
-/* Official (settlement) price next to the strike */
-.official-age { font-size: 10px; font-weight: 500; color: var(--ink-3); margin-left: 4px; }
 @media (max-width: 720px) {
   /* One compact row on phones so the chart keeps its height; last rounds stay on larger screens */
-  .strike-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .strike-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .strike-row .cell-val { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .strike-row .cell-label { font-size: 9px; }
-  .strike-row .official-age { display: none; }
   .strike-cell:has(#recent-results) { display: none; }
 }
 

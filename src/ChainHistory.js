@@ -50,6 +50,10 @@ export class ChainHistory {
     this.status = 'idle';           // idle | syncing | live | error
     this.error = null;
     this.listeners = new Set();
+    this.marketListeners = new Set(); // (Set of marketIds touched by new events) => void
+    this.gasListeners = new Set();    // (gasPrice wei: bigint) => void
+    this.gasPrice = null;
+    this.touched = new Set();
     this.started = false;
     this.totals = { paidToWinners: null, settledVolume: null };
 
@@ -68,6 +72,19 @@ export class ChainHistory {
 
   notify() {
     for (const fn of this.listeners) fn(this);
+  }
+
+  /** Called with the market ids that new contract events touched (pushed by the relay, never polled) */
+  onMarketEvents(fn) {
+    this.marketListeners.add(fn);
+    return () => this.marketListeners.delete(fn);
+  }
+
+  /** Called with the network gas price whenever the relay pushes a new one */
+  onGas(fn) {
+    this.gasListeners.add(fn);
+    if (this.gasPrice !== null) fn(this.gasPrice);
+    return () => this.gasListeners.delete(fn);
   }
 
   hasOlder() {
@@ -137,6 +154,13 @@ export class ChainHistory {
       if (body.address.toLowerCase() !== this.address.toLowerCase()) {
         throw new Error(`The relay indexes ${body.address}, not this app's contract ${this.address}.`);
       }
+      if (body.gasPrice !== undefined && body.gasPrice !== null) {
+        const gas = BigInt(body.gasPrice);
+        if (gas !== this.gasPrice) {
+          this.gasPrice = gas;
+          for (const fn of this.gasListeners) fn(gas);
+        }
+      }
       const pendingClaims = [];
       for (const log of body.logs) {
         this.blockTimes.set(log.blockNumber, log.timestamp * 1000); // relay sends seconds; the UI uses ms
@@ -148,9 +172,18 @@ export class ChainHistory {
       const first = this.newest === null;
       this.oldest = this.deployBlock;
       this.newest = Math.max(this.newest ?? body.head, body.head);
-      if (first || body.logs.length) await this.refreshTotals();
+      // All-time totals change only when a round settles: re-read them then, not on every bet
+      if (first || this.settledSinceTotals) {
+        this.settledSinceTotals = false;
+        await this.refreshTotals();
+      }
       this.status = 'live';
       this.error = null;
+      if (this.touched.size) {
+        const touched = this.touched;
+        this.touched = new Set();
+        for (const fn of this.marketListeners) fn(touched);
+      }
     } catch (err) {
       this.status = 'error';
       this.error = err.message;
@@ -177,6 +210,7 @@ export class ChainHistory {
 
     const base = { id: key, block: log.blockNumber, logIndex: log.index ?? log.logIndex, tx: log.transactionHash };
     const a = ev.args;
+    if (a.marketId) this.touched.add(String(a.marketId).toLowerCase());
     const round = (marketId, roundId) => {
       const k = `${String(marketId).toLowerCase()}:${roundId}`;
       if (!this.rounds.has(k)) {
@@ -222,6 +256,7 @@ export class ChainHistory {
         break;
       }
       case 'RoundSettled': {
+        this.settledSinceTotals = true;
         const r = round(a.marketId, a.roundId);
         r.status = 'settled';
         r.closePrice = toPrice(a.closePrice);

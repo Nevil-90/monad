@@ -171,8 +171,11 @@ async function runEvmTests() {
   assert(r1.totalUp === ethers.parseEther('12'), 'Acceptable slippage order executes successfully (12 MON Up)');
   assert(r1.upBettors === 1n && r1.downBettors === 1n, 'Bettor counters count each wallet once per round (1 Up, 1 Down)');
 
-  // Advance time into 10-second anti-frontrunning cutoff (52s elapsed of 60s)
-  await increaseTime(52);
+  // Advance time into the 10-second anti-frontrunning cutoff (lock is on the 10 s report grid)
+  {
+    const blk = await provider.getBlock('latest');
+    await increaseTime(Number(r1.betCloseTimestamp) - blk.timestamp + 2);
+  }
   let bufferReverted = false;
   try {
     await amm.connect(user2).betDown(marketId, 1, { value: ethers.parseEther('1') });
@@ -305,8 +308,8 @@ async function runEvmTests() {
     }
   };
   const pinMs = pinned(r3.lockTimestamp) * 1000n;
-  assert(await lockFails(signerKeys.map((k) => signReport(k, 'BTC', 6425000000000n, pinMs + 10000n)), 'Report not at pinned timestamp'),
-    'Reports for a later 10s mark are rejected (no choice of timestamp)');
+  assert(await lockFails(signerKeys.map((k) => signReport(k, 'BTC', 6425000000000n, pinMs + 40000n)), 'Report not at pinned timestamp'),
+    'Reports more than 30 s after the pinned mark are rejected (a later mark is only a challengeable fallback, SEC-28)');
   assert(await lockFails(reports(6425000000000n, r3.lockTimestamp, signerKeys.slice(0, 4)), 'Not enough oracle signatures'),
     '4 of 5 signatures rejected: every signer must sign (no choice of signer subset)');
   const dup = reports(6425000000000n, r3.lockTimestamp);

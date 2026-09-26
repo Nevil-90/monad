@@ -24,7 +24,7 @@ import { MonadRpcProvider } from '../src/rpc.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLAYERS = 5;
-const FUND_EACH = ethers.parseEther('0.8');
+const FUND_EACH = ethers.parseEther('3.2');
 const cfg = getConfig();
 if (!cfg.contractAddress || !process.env.KEEPER_PRIVATE_KEY) {
   console.error('Needs NEXT_PUBLIC_CONTRACT_ADDRESS and KEEPER_PRIVATE_KEY in .env');
@@ -60,9 +60,10 @@ async function fund() {
 
 // Scenario: side per player for each market ('UP' / 'DOWN'), stakes in MON
 const PLAN = {
-  BTC: [['UP', '0.20'], ['DOWN', '0.10'], ['UP', '0.15'], ['DOWN', '0.25'], ['UP', '0.05']],
-  ETH: [['DOWN', '0.30'], ['UP', '0.10'], ['DOWN', '0.05'], ['UP', '0.20'], ['DOWN', '0.10']],
-  SOL: [['UP', '0.10'], ['UP', '0.05'], ['UP', '0.10'], null, null] // one-sided: must refund
+  // Stakes at or above the deployed minBet (0.42 MON at 102 gwei, SEC-11)
+  BTC: [['UP', '0.80'], ['DOWN', '0.50'], ['UP', '0.60'], ['DOWN', '0.90'], ['UP', '0.45']],
+  ETH: [['DOWN', '0.90'], ['UP', '0.50'], ['DOWN', '0.45'], ['UP', '0.70'], ['DOWN', '0.50']],
+  SOL: [['UP', '0.50'], ['UP', '0.45'], ['UP', '0.60'], null, null] // one-sided: must refund
 };
 
 /**
@@ -114,7 +115,7 @@ async function waitResolved(placed) {
       const r = await amm.rounds(p.marketId, p.roundId);
       const oneSided = r.totalUp === 0n || r.totalDown === 0n;
       const now = Date.now() / 1000;
-      const timedOut = now > Number(r.closeTimestamp) + Number(await amm.emergencyTimeout());
+      const timedOut = now > Number(r.expiryTimestamp);
       const refundable = Number(r.status) === 4 || (oneSided && now > Number(r.betCloseTimestamp)) || timedOut;
       return [key, Number(r.status) === 3 || refundable];
     }));

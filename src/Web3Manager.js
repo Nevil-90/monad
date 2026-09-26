@@ -561,7 +561,10 @@ export class Web3Manager {
         closeTimestamp: Number(d.closeTimestamp),
         betCloseTimestamp: Number(d.betCloseTimestamp),
         lockPublishTime: Number(d.lockPublishTime),
-        closePublishTime: Number(d.closePublishTime),
+        closePublishTime: Number(d.closePublishTime), // 0 until a close price is proposed
+        expiryTimestamp: Number(d.expiryTimestamp),   // unresolved after this: refundable (SEC-29)
+        finalizeAfter: Number(d.finalizeAfter),       // end of the challenge period for a late report (SEC-28)
+        maxReportDelay: Number(d.maxReportDelay),
         lockPrice: d.lockPrice,
         closePrice: d.closePrice,
         totalUp: d.totalUp,

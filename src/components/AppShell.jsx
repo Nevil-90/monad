@@ -98,11 +98,7 @@ export default function AppShell() {
             <div className="strike-row">
               <div className="strike-cell">
                 <span className="cell-label">Strike</span>
-                <span className="cell-val num" id="strike-val">Sets at lock</span>
-              </div>
-              <div className="strike-cell" id="official-cell">
-                <span className="cell-label">Official price</span>
-                <span className="cell-val num" id="official-val" title="RedStone's signed price: the one the contract settles on">—</span>
+                <span className="cell-val num" id="strike-val" title="RedStone's signed price at the lock time, verified by the contract">Sets at lock</span>
               </div>
               <div className="strike-cell">
                 <span className="cell-label">Distance</span>
@@ -145,6 +141,7 @@ export default function AppShell() {
           <div className="result hidden" id="result" role="status" aria-live="polite">
             <div className="result-title" id="result-title">—</div>
             <div className="result-sub" id="result-sub">—</div>
+            <div className="result-state" id="result-state" />
           </div>
 
           {/* Console */}
@@ -369,7 +366,7 @@ export default function AppShell() {
                 <div><h3>No contest, stake back</h3><p>If nobody took the other side, or the price closes exactly at the strike, your stake is refunded in full. Network fees for placing and claiming a bet are paid to Monad and are not refundable.</p></div>
               </li>
             </ol>
-            <p className="guide-note">The chart streams live Coinbase trades. Rounds are decided by the official price: RedStone's signed reports, verified by the contract, shown next to the strike. Every bet and payout is a transaction on Monad, public in the Dashboard. Connect a wallet with MON to play.</p>
+            <p className="guide-note">The chart streams live Coinbase trades. Rounds are decided by the official price: RedStone's signed report at the lock time (the strike) and at the close time, verified by the contract. The two sources agree to a few hundredths of a percent, so a round that close is shown as too close to call. Every bet and payout is a transaction on Monad, public in the Dashboard. Connect a wallet with MON to play.</p>
             <div className="modal-actions"><button className="solid-btn" data-close="guide-modal">Start trading</button></div>
           </div>
         </div>
