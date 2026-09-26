@@ -1,0 +1,99 @@
+/**
+ * scripts/mutation_check.js
+ * Proves the security regression suite actually guards each fix in SECURITY_FIXES.md.
+ * For every mutation it re-introduces the original bug into MonadUpDownAMM.sol, recompiles, runs
+ * test/security_regressions.test.js and expects the matching [SEC-xx] checks to FAIL.
+ * The contract is always restored and recompiled afterwards.
+ *
+ * Run: npm run test:mutation
+ */
+
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
+
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const contractPath = path.join(rootDir, 'contracts', 'MonadUpDownAMM.sol');
+const original = fs.readFileSync(contractPath, 'utf8');
+
+const MUTATIONS = [
+  {
+    id: 'SEC-01/02',
+    name: 'Old +/-60s staleness tolerance instead of pinning to the target timestamp',
+    from: 'updateData, ids, uint64(target), uint64(target + window)',
+    to: 'updateData, ids, uint64(target - 60), uint64(target + 60)',
+    extra: [['require(p.publishTime >= target && p.publishTime <= target + window, "Oracle price outside window");', '']],
+    expect: ['SEC-01', 'SEC-02']
+  },
+  {
+    id: 'SEC-03',
+    name: 'Push keeper bounty to the locker with an unbounded call',
+    from: 'keeperRewards[locker] += split;',
+    to: '(bool s1, ) = payable(locker).call{value: split}(""); if (!s1) treasuryFees[marketId] += split;',
+    expect: ['SEC-03']
+  },
+  {
+    id: 'SEC-05',
+    name: 'Use the live lockBufferSeconds instead of the per-round snapshot',
+    from: 'block.timestamp <= round.betCloseTimestamp,',
+    to: 'block.timestamp <= round.lockTimestamp - lockBufferSeconds,',
+    extra: [['round.betCloseTimestamp = lock - (lockBufferSeconds < half ? lockBufferSeconds : half);', 'round.betCloseTimestamp = lock - lockBufferSeconds;']],
+    expect: ['SEC-05']
+  },
+  {
+    id: 'SEC-06',
+    name: 'Remove the pause check on bets',
+    from: 'require(!paused, "Protocol paused");\n        require(msg.value >= minBet',
+    to: 'require(msg.value >= minBet',
+    expect: ['SEC-06']
+  },
+  {
+    id: 'SEC-07',
+    name: 'Single-step ownership transfer',
+    from: 'pendingOwner = newOwner;',
+    to: 'pendingOwner = newOwner; owner = newOwner;',
+    expect: ['SEC-07']
+  },
+  {
+    id: 'SEC-09',
+    name: 'Market existence keyed on `active`',
+    from: 'require(markets[marketId].creator == address(0), "Market already exists");',
+    to: 'require(!markets[marketId].active, "Market already exists");',
+    expect: ['SEC-09']
+  }
+];
+
+function run(cmd) {
+  try {
+    return { ok: true, out: execSync(cmd, { cwd: rootDir, stdio: 'pipe', encoding: 'utf8' }) };
+  } catch (err) {
+    return { ok: false, out: `${err.stdout || ''}${err.stderr || ''}` };
+  }
+}
+
+let allCaught = true;
+try {
+  for (const m of MUTATIONS) {
+    let src = original;
+    for (const [from, to] of [[m.from, m.to], ...(m.extra || [])]) {
+      if (!src.includes(from)) throw new Error(`[${m.id}] mutation anchor not found (contract changed?): ${from}`);
+      src = src.replace(from, to);
+    }
+    fs.writeFileSync(contractPath, src);
+
+    const compiled = run('node scripts/compile.js');
+    if (!compiled.ok) throw new Error(`[${m.id}] mutant failed to compile:\n${compiled.out}`);
+    const result = run('node test/security_regressions.test.js');
+    const failedIds = new Set([...result.out.matchAll(/\[FAIL\]\S* \[(SEC-\d+)\]/g)].map((x) => x[1]));
+    const caught = m.expect.every((id) => failedIds.has(id));
+    allCaught &&= caught;
+    console.log(`${caught ? '[CAUGHT]' : '\x1b[31m[MISSED]\x1b[0m'} ${m.id}: ${m.name} -> failing: ${[...failedIds].join(', ') || 'none'}`);
+  }
+} finally {
+  fs.writeFileSync(contractPath, original);
+  run('node scripts/compile.js');
+}
+
+console.log(allCaught ? '\nAll re-introduced bugs were detected by the regression suite.' : '\nSome re-introduced bugs were NOT detected.');
+if (!allCaught) process.exitCode = 1;

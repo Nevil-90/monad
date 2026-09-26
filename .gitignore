@@ -1,0 +1,21 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+.next/
+out/
+
+# Secrets: only .env.example is shared
+.env
+.env.*
+!.env.example
+
+# Local only: personal task log, editor/assistant settings, outdated research scripts
+checklist.md
+archive/
+
+# OS / editor noise
+.DS_Store
+*.log
+.vscode/
+.idea/

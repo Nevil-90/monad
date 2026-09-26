@@ -1,0 +1,29 @@
+{
+  "name": "monad-updown-amm",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000 --host",
+    "build": "vite build",
+    "preview": "vite preview",
+    "compile": "node scripts/compile.js",
+    "test": "node test/amm_invariants.test.js",
+    "test:evm": "node test/contract_evm.test.js",
+    "test:security": "node test/security_regressions.test.js",
+    "test:mutation": "node scripts/mutation_check.js",
+    "dev:chain": "node scripts/dev_chain.js",
+    "relay": "node --env-file-if-exists=.env scripts/price_relay.js",
+    "keeper": "node --env-file-if-exists=.env scripts/keeper_bot.js",
+    "deploy": "node --env-file-if-exists=.env scripts/deploy.js",
+    "test:all": "npm run compile && npm test && npm run test:evm && npm run test:security"
+  },
+  "devDependencies": {
+    "ganache": "^7.9.2",
+    "solc": "^0.8.24",
+    "vite": "^6.0.7"
+  },
+  "dependencies": {
+    "ethers": "^6.17.0"
+  }
+}
