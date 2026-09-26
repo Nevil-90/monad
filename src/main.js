@@ -40,7 +40,12 @@ function countTo(node, to, decimals = 2, duration = 1200) {
   requestAnimationFrame(step);
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+let started = false;
+
+/** Called once by src/components/AppController.jsx after the server-rendered page hydrates */
+export function startApp() {
+  if (started) return;
+  started = true;
   const el = {
     canvas: $('horizon'),
     readout: $('readout'),
@@ -337,7 +342,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!name) return fail('Enter an asset name.');
     if (!/^[A-Z0-9][A-Z0-9/ .-]{0,15}$/.test(symbol)) return fail('Enter a symbol such as SUI/USD.');
-    if (!/^0x[0-9a-fA-F]{64}$/.test(feed)) return fail('The Pyth feed ID is 0x followed by 64 hex characters.');
+    if (!/^[A-Za-z0-9_]{1,31}$/.test(feed)) return fail('The feed ID is a RedStone feed name such as SUI (letters, digits, underscores).');
     if (!isLive || !web3.account) return fail('Switch to Live and connect a wallet to create a market.');
 
     errorEl.classList.add('hidden');
@@ -795,10 +800,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (status === 'NOT_CONFIGURED') {
         el.feedLatency.textContent = 'No price feed';
         el.feedDot.classList.remove('live');
-        toast('No price feed configured', 'Set VITE_PRICE_RELAY_URL to the Pyth relay (see .env.example).', { error: true, sticky: true });
+        toast('No price feed configured', 'Set NEXT_PUBLIC_PRICE_RELAY_URL to the price relay (see .env.example).', { error: true, sticky: true });
         return;
       }
-      el.feedLatency.textContent = latency === null || latency === undefined ? source : `${source} · ${latency}ms`;
+      el.feedLatency.textContent = latency === null || latency === undefined ? source
+        : latency >= 1000 ? `${source} · ${(latency / 1000).toFixed(1)}s` : `${source} · ${latency}ms`;
       el.feedDot.classList.toggle('live', Boolean(isConnected));
     },
 
@@ -1081,12 +1087,10 @@ document.addEventListener('DOMContentLoaded', () => {
   renderLedger();
   updateSafeArea();
   engine.start();
-});
 
-// Installable app: the service worker is registered for production builds only, so development
-// always runs fresh code
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
+  // Installable app: the service worker is registered for production builds only, so development
+  // always runs fresh code
+  if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch((err) => console.warn('Service worker not registered:', err));
-  });
+  }
 }

@@ -14,7 +14,6 @@
  * 9. BUG-01: Bounded lock window anti-MEV protection
  * 10. BUG-02: Emergency timeout refund recovery
  * 11. BUG-03: Strict round sequencing & public DoS immunity
- * 12. BUG-04: Pyth exponent normalization (cross-decimal order protection)
  * 13. BUG-05: Pull-oracle calldata compliance
  * 14. BUG-06: Non-blocking keeper gas rebate with treasury redirection
  * 15. BUG-07: Uninterrupted round chaining on all cancellation paths
@@ -163,7 +162,7 @@ console.log('\n--- Testing Invariant #6: Canonical Deterministic Market IDs ---'
     const m = SUPPORTED_MARKETS[k];
     const expectedId = ethers.solidityPackedKeccak256(
       ['bytes32', 'string', 'uint256'],
-      [m.pythId, m.symbol, m.roundDuration]
+      [ethers.encodeBytes32String(m.feed), m.symbol, m.roundDuration]
     );
     assert(m.marketId === expectedId, `${m.symbol} canonical market ID matches on-chain derivation (${m.marketId.slice(0, 14)}...)`);
   });
@@ -254,39 +253,6 @@ console.log('\n--- Testing Invariant #11 (BUG-03 Fix): Strict Round Sequencing -
   currentRoundStatus = 'Settled';
   canStartNext = currentRoundStatus === 'Settled' || currentRoundStatus === 'Cancelled';
   assert(canStartNext === true, 'Next round permitted once previous round is Settled');
-}
-
-// -----------------------------------------------------------------------------
-// Test 12: BUG-04 Fix Verification - Pyth Exponent Normalization
-// -----------------------------------------------------------------------------
-console.log('\n--- Testing Invariant #12 (BUG-04 Fix): Decimal Normalization Math ---');
-{
-  function normalizePrice(price, expo) {
-    const targetDecimals = 18;
-    const shift = targetDecimals + expo;
-    const pBig = BigInt(price);
-    if (shift >= 0) {
-      return pBig * (10n ** BigInt(shift));
-    } else {
-      return pBig / (10n ** BigInt(-shift));
-    }
-  }
-
-  // Case: Lock price is $64,250.00 with expo = -8 (6,425,000,000,000)
-  // Close price is $64,251.00 with expo = -7 (642,510,000,000)
-  const rawLock = 6425000000000n;
-  const rawClose = 642510000000n;
-  
-  // Without normalization: rawClose < rawLock (DOWN wins falsely!)
-  const unnormalizedWinner = rawClose > rawLock ? 'UP' : 'DOWN';
-  assert(unnormalizedWinner === 'DOWN', 'Unnormalized comparison falsely flips winner (demonstrating vulnerability)');
-
-  // With normalization: both scaled to 18 decimals
-  const normLock = normalizePrice(rawLock, -8);
-  const normClose = normalizePrice(rawClose, -7);
-  const normalizedWinner = normClose > normLock ? 'UP' : 'DOWN';
-  assert(normalizedWinner === 'UP', 'Normalized comparison accurately detects price rise from $64,250 to $64,251');
-  assert(normClose === 64251n * (10n ** 18n), 'Normalized close price equals 64,251 * 10^18');
 }
 
 // -----------------------------------------------------------------------------
@@ -438,19 +404,6 @@ console.log('\n--- Testing Invariant #19: Dual-Keeper Gas Rebate Incentive Split
   // Case B: Same bot calls both
   const singleBotReward = keeperReward;
   assert(singleBotReward === 10n * (10n ** 18n), 'Single bot executing lock + settle receives 100% gas bounty');
-}
-
-// -----------------------------------------------------------------------------
-// Test 20: Excess Pyth Fee Auto-Refund
-// -----------------------------------------------------------------------------
-console.log('\n--- Testing Invariant #20: Excess Pyth Update Fee Auto-Refund ---');
-{
-  const pythUpdateFee = 100000000000000n; // 0.0001 MON
-  const sentValue = 5000000000000000n;     // 0.005 MON sent by keeper
-
-  const excess = sentValue > pythUpdateFee ? sentValue - pythUpdateFee : 0n;
-  assert(excess === 4900000000000000n, 'Excess 0.0049 MON calculated for automatic refund to keeper');
-  assert(sentValue - excess === pythUpdateFee, 'Contract only spends exact Pyth fee; zero keeper money trapped');
 }
 
 // -----------------------------------------------------------------------------

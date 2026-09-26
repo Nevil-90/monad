@@ -8,8 +8,8 @@
  * 
  * Flow:
  * 1. Validates RPC connectivity and gas parameters.
- * 2. Deploys MonadUpDownAMM with Pyth oracle address.
- * 3. Initializes canonical markets (BTC, ETH, SOL, MON) with verified Pyth IDs.
+ * 2. Deploys MonadUpDownAMM with RedStone's primary-prod signer set (all 5 signatures required).
+ * 3. Initializes canonical markets (BTC, ETH, SOL, MON) and marks them verified.
  * 4. Outputs verified contract addresses and deployment receipt.
  */
 
@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ENVIRONMENTS, SUPPORTED_MARKETS } from '../src/config.js';
+import { REDSTONE_PRIMARY_SIGNERS, feedIdBytes32, fetchLatestReports } from '../src/oracle.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,12 +43,13 @@ async function deploy() {
 
   const config = ENVIRONMENTS[targetNet];
   if (!config) throw new Error(`Unknown --network "${targetNet}". Use one of: ${Object.keys(ENVIRONMENTS).join(', ')}.`);
-  if (!config.pythContractAddress) throw new Error(`${config.name}: Pyth contract address is not configured.`);
+  const signers = REDSTONE_PRIMARY_SIGNERS;
+  const threshold = signers.length;
 
   console.log(`[1] Selected Target Environment: ${config.name}`);
   console.log(`    Chain ID: ${config.chainId} (${config.chainIdHex})`);
   console.log(`    RPC Endpoint: ${config.rpcUrl}`);
-  console.log(`    Pyth Oracle: ${config.pythContractAddress}`);
+  console.log(`    Oracle: RedStone primary-prod, ${threshold} of ${signers.length} signatures required`);
   console.log(`    Deployment Mode: ${isDryRun ? 'DRY-RUN / PRE-FLIGHT VERIFICATION' : 'LIVE BROADCAST'}`);
 
   // Load compiled artifacts
@@ -66,12 +68,13 @@ async function deploy() {
   console.log(`    Bytecode Size: ${(bytecode.length - 2) / 2} bytes`);
   console.log(`    ABI Functions: ${abi.filter(x => x.type === 'function').length} functions`);
 
-  console.log('\n[3] Verifying Multi-Market Pyth Feed Registries:');
+  console.log('\n[3] Verifying market IDs against src/config.js:');
   for (const [key, m] of Object.entries(SUPPORTED_MARKETS)) {
     const canonicalKey = ethers.keccak256(
-      ethers.solidityPacked(['bytes32', 'string', 'uint256'], [m.pythId, m.symbol, m.roundDuration])
+      ethers.solidityPacked(['bytes32', 'string', 'uint256'], [feedIdBytes32(m.feed), m.symbol, m.roundDuration])
     );
-    console.log(`    - ${m.symbol} | Pyth ID: ${m.pythId.slice(0, 18)}... | Derived ID: ${canonicalKey.slice(0, 18)}...`);
+    if (canonicalKey !== m.marketId) throw new Error(`${m.symbol}: marketId in src/config.js does not match ${canonicalKey}`);
+    console.log(`    - ${m.symbol} | feed ${m.feed} | market ID ${canonicalKey.slice(0, 18)}... matches config`);
   }
 
   if (isDryRun) {
@@ -82,18 +85,20 @@ async function deploy() {
       throw new Error(`RPC returned chainId ${network.chainId}, expected ${config.chainId}.`);
     }
     console.log(`    [OK] RPC reachable, chainId ${network.chainId}`);
-    if ((await provider.getCode(config.pythContractAddress)) === '0x') {
-      throw new Error(`No Pyth contract at ${config.pythContractAddress} on ${config.name}.`);
+    const feeds = Object.values(SUPPORTED_MARKETS).map((m) => m.feed);
+    const latest = await fetchLatestReports(feeds, { signers });
+    for (const feed of feeds) {
+      if (latest[feed].length < threshold) throw new Error(`RedStone: only ${latest[feed].length} of ${threshold} signed ${feed} reports right now.`);
     }
-    console.log(`    [OK] Pyth contract present at ${config.pythContractAddress}`);
+    console.log(`    [OK] RedStone gateway: all ${threshold} signers currently sign ${feeds.join(', ')}`);
     const factory = new ethers.ContractFactory(abi, bytecode);
-    const deployTx = await factory.getDeployTransaction(config.pythContractAddress);
+    const deployTx = await factory.getDeployTransaction(signers, threshold);
     const gas = await provider.estimateGas(deployTx);
     console.log(`    [OK] Deployment simulates successfully (estimated gas ${gas})`);
     console.log('\n================================================================================');
     console.log('DRY-RUN COMPLETE: pre-flight checks passed');
     console.log('To broadcast live to Monad Testnet:');
-    console.log('  DEPLOYER_PRIVATE_KEY=<KEY> node scripts/deploy.js --network testnet');
+    console.log('  npm run deploy -- --network testnet   (DEPLOYER_PRIVATE_KEY in .env)');
     console.log('================================================================================');
     return;
   }
@@ -112,7 +117,7 @@ async function deploy() {
 
   console.log('\n[5] Broadcasting MonadUpDownAMM Deployment Transaction...');
   const factory = new ethers.ContractFactory(abi, bytecode, wallet);
-  const contract = await factory.deploy(config.pythContractAddress);
+  const contract = await factory.deploy(signers, threshold);
   console.log(`    Tx Broadcast: ${contract.deploymentTransaction()?.hash}`);
   console.log('    Waiting for confirmation on Monad...');
 
@@ -123,8 +128,9 @@ async function deploy() {
   console.log('\n[6] Initializing Canonical Multi-Markets On-Chain...');
   for (const [key, m] of Object.entries(SUPPORTED_MARKETS)) {
     console.log(`    Creating Market: ${m.symbol} (${m.name}, duration: ${m.roundDuration}s)...`);
-    const tx = await contract.createMarket(m.pythId, m.name, m.symbol, m.roundDuration);
+    const tx = await contract.createMarket(feedIdBytes32(m.feed), m.name, m.symbol, m.roundDuration);
     await tx.wait();
+    await (await contract.setMarketVerified(m.marketId, true)).wait();
     console.log(`    [OK] Market ${m.symbol} initialized. Tx: ${tx.hash}`);
   }
 
@@ -134,8 +140,8 @@ async function deploy() {
   console.log(`Explorer Link:    ${config.explorerUrl}/address/${deployedAddress}`);
   const deployBlock = (await contract.deploymentTransaction().wait()).blockNumber;
   console.log('Point the frontend at this deployment:');
-  console.log(`  VITE_CONTRACT_ADDRESS=${deployedAddress}`);
-  console.log(`  VITE_CONTRACT_DEPLOY_BLOCK=${deployBlock}`);
+  console.log(`  NEXT_PUBLIC_CONTRACT_ADDRESS=${deployedAddress}`);
+  console.log(`  NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK=${deployBlock}`);
   console.log('================================================================================\n');
 }
 

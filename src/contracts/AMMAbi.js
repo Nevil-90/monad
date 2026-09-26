@@ -3,9 +3,14 @@ export const AMM_ABI = [
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "_pythOracle",
-        "type": "address"
+        "internalType": "address[]",
+        "name": "signers",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "threshold",
+        "type": "uint256"
       }
     ],
     "stateMutability": "nonpayable",
@@ -110,7 +115,7 @@ export const AMM_ABI = [
       {
         "indexed": true,
         "internalType": "bytes32",
-        "name": "pythFeedId",
+        "name": "feedId",
         "type": "bytes32"
       },
       {
@@ -158,6 +163,56 @@ export const AMM_ABI = [
       }
     ],
     "name": "MarketStatusUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [],
+    "name": "OracleSignersProposalCancelled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "signers",
+        "type": "address[]"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "threshold",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "eta",
+        "type": "uint256"
+      }
+    ],
+    "name": "OracleSignersProposed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "signers",
+        "type": "address[]"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "threshold",
+        "type": "uint256"
+      }
+    ],
+    "name": "OracleSignersUpdated",
     "type": "event"
   },
   {
@@ -507,6 +562,19 @@ export const AMM_ABI = [
   },
   {
     "inputs": [],
+    "name": "MAX_ORACLE_SIGNERS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_ROUND_DURATION",
     "outputs": [
       {
@@ -534,6 +602,19 @@ export const AMM_ABI = [
   {
     "inputs": [],
     "name": "MIN_ROUND_DURATION",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "ORACLE_CHANGE_DELAY",
     "outputs": [
       {
         "internalType": "uint256",
@@ -594,6 +675,13 @@ export const AMM_ABI = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "applyOracleSigners",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -679,6 +767,13 @@ export const AMM_ABI = [
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "cancelOracleSignersProposal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -744,7 +839,31 @@ export const AMM_ABI = [
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "pythFeedId",
+        "name": "marketId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "roundId",
+        "type": "uint256"
+      }
+    ],
+    "name": "closeReportTimestamp",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "feedId",
         "type": "bytes32"
       },
       {
@@ -836,7 +955,7 @@ export const AMM_ABI = [
           },
           {
             "internalType": "bytes32",
-            "name": "pythFeedId",
+            "name": "feedId",
             "type": "bytes32"
           },
           {
@@ -974,7 +1093,7 @@ export const AMM_ABI = [
           },
           {
             "internalType": "bytes32",
-            "name": "pythFeedId",
+            "name": "feedId",
             "type": "bytes32"
           },
           {
@@ -1269,16 +1388,57 @@ export const AMM_ABI = [
         "internalType": "uint256",
         "name": "roundId",
         "type": "uint256"
+      }
+    ],
+    "name": "lockReportTimestamp",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "marketId",
+        "type": "bytes32"
       },
       {
-        "internalType": "bytes[]",
-        "name": "priceUpdateData",
-        "type": "bytes[]"
+        "internalType": "uint256",
+        "name": "roundId",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "value",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "timestampMs",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes",
+            "name": "signature",
+            "type": "bytes"
+          }
+        ],
+        "internalType": "struct SignedPriceOracle.SignedPrice[]",
+        "name": "reports",
+        "type": "tuple[]"
       }
     ],
     "name": "lockRoundWithUpdate",
     "outputs": [],
-    "stateMutability": "payable",
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1303,7 +1463,7 @@ export const AMM_ABI = [
       },
       {
         "internalType": "bytes32",
-        "name": "pythFeedId",
+        "name": "feedId",
         "type": "bytes32"
       },
       {
@@ -1365,6 +1525,19 @@ export const AMM_ABI = [
   },
   {
     "inputs": [],
+    "name": "oracleSigners",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "owner",
     "outputs": [
       {
@@ -1384,6 +1557,29 @@ export const AMM_ABI = [
         "internalType": "bool",
         "name": "",
         "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "pendingOracleSigners",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "signers",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "threshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "eta",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1416,6 +1612,24 @@ export const AMM_ABI = [
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address[]",
+        "name": "signers",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "threshold",
+        "type": "uint256"
+      }
+    ],
+    "name": "proposeOracleSigners",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "protocolTotalFeeBps",
     "outputs": [
@@ -1423,19 +1637,6 @@ export const AMM_ABI = [
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "pythOracle",
-    "outputs": [
-      {
-        "internalType": "contract IPyth",
-        "name": "",
-        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -1683,14 +1884,44 @@ export const AMM_ABI = [
         "type": "uint256"
       },
       {
-        "internalType": "bytes[]",
-        "name": "priceUpdateData",
-        "type": "bytes[]"
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "value",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "timestampMs",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes",
+            "name": "signature",
+            "type": "bytes"
+          }
+        ],
+        "internalType": "struct SignedPriceOracle.SignedPrice[]",
+        "name": "reports",
+        "type": "tuple[]"
       }
     ],
     "name": "settleRoundWithUpdate",
     "outputs": [],
-    "stateMutability": "payable",
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "signerThreshold",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

@@ -2,14 +2,15 @@
 pragma solidity ^0.8.24;
 
 import "./AMMMath.sol";
-import "./IPyth.sol";
+import "./SignedPriceOracle.sol";
 
 /**
  * @title MonadUpDownAMM
  * @author MonadPulse Protocol
  * @notice Fully on-chain, permissionless Up/Down binary options AMM built for Monad Parallel EVM.
+ * Prices come from signed oracle reports (RedStone's free public feeds), verified in SignedPriceOracle.
  */
-contract MonadUpDownAMM {
+contract MonadUpDownAMM is SignedPriceOracle {
     using AMMMath for uint256;
 
     enum RoundStatus {
@@ -44,9 +45,9 @@ contract MonadUpDownAMM {
         uint256 creatorFeeBps; // Snapshotted creator fee
         uint256 keeperFeeBps;  // Snapshotted keeper fee
         uint256 betCloseTimestamp; // SEC-05: snapshotted betting cutoff (immune to later owner param changes)
-        uint256 priceWindow;       // SEC-05: snapshotted oracle tolerance window in seconds
-        uint256 lockPublishTime;   // SEC-01/02: Pyth publishTime of the pinned lock price
-        uint256 closePublishTime;  // SEC-01/02: Pyth publishTime of the pinned close price
+        uint256 priceWindow;       // SEC-05: snapshotted oracle report interval in seconds (prices are pinned to its multiples)
+        uint256 lockPublishTime;   // SEC-01/02: timestamp (s) of the pinned lock report
+        uint256 closePublishTime;  // SEC-01/02: timestamp (s) of the pinned close report
         uint256 upBettors;         // Distinct wallets on Up this round
         uint256 downBettors;       // Distinct wallets on Down this round
     }
@@ -60,7 +61,7 @@ contract MonadUpDownAMM {
     struct Market {
         bytes32 marketId;
         address creator;            // Earns 0.1% royalty on all settled volume
-        bytes32 pythFeedId;         // Dynamic Pyth Price Feed ID (No hardcoding)
+        bytes32 feedId;             // Oracle data feed id, e.g. bytes32("BTC")
         string name;                // e.g. "Bitcoin"
         string symbol;              // e.g. "BTC/USD"
         uint256 roundDuration;      // e.g. 60 seconds
@@ -78,10 +79,13 @@ contract MonadUpDownAMM {
     uint256 public protocolTotalFeeBps = 150; // 1.5% Total
 
     uint256 public lockBufferSeconds = 10;    // Anti-Frontrunning Buffer before lockTimestamp
-    // SEC-01/02: lock/close prices are the FIRST Pyth price published at/after the target timestamp,
-    // and must land within this many seconds of it. Replaces maxLockDelay / maxSettleDelay / oracleMaxStaleness.
+    // SEC-01/02: oracle nodes sign a report every `priceWindowSeconds`, on its exact multiples. The lock
+    // and close prices are the report at the first multiple at/after the target time: one timestamp,
+    // so the caller has no choice of price.
     uint256 public priceWindowSeconds = 10;
-    uint256 public emergencyTimeout = 2 hours;// Max time before any stuck round can be emergency refunded
+    // Past reports cannot be fetched from the free gateway, so if nobody captured a round's report
+    // the round is refunded after this timeout instead of waiting hours (SEC-21).
+    uint256 public emergencyTimeout = 10 minutes;
     uint256 public minBet = 0.001 ether;       // Minimum bet in native MON
     uint256 public constant MIN_ROUND_DURATION = 30;   // Minimum 30s round
     uint256 public constant MAX_ROUND_DURATION = 86400;// Maximum 1 day
@@ -89,7 +93,6 @@ contract MonadUpDownAMM {
     address public owner;
     address public pendingOwner;  // SEC-07: two-step ownership transfer
     bool public paused;           // SEC-06: blocks new bets & markets; resolution and claims always work
-    IPyth public pythOracle;
 
     // On-Chain Market Registry (Zero Database)
     bytes32[] public allMarketIds;
@@ -129,7 +132,7 @@ contract MonadUpDownAMM {
     event MarketCreated(
         bytes32 indexed marketId,
         address indexed creator,
-        bytes32 indexed pythFeedId,
+        bytes32 indexed feedId,
         string name,
         string symbol,
         uint256 roundDuration
@@ -155,10 +158,26 @@ contract MonadUpDownAMM {
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
-    constructor(address _pythOracle) {
+    constructor(address[] memory signers, uint256 threshold) {
         owner = msg.sender;
-        pythOracle = IPyth(_pythOracle);
+        _setSigners(signers, threshold);
         _status = 1;
+    }
+
+    // =========================================================================
+    // ORACLE SIGNERS: changes are public and take effect only after ORACLE_CHANGE_DELAY (SEC-22)
+    // =========================================================================
+
+    function proposeOracleSigners(address[] calldata signers, uint256 threshold) external onlyOwner {
+        _proposeSigners(signers, threshold);
+    }
+
+    function applyOracleSigners() external onlyOwner {
+        _applySigners();
+    }
+
+    function cancelOracleSignersProposal() external onlyOwner {
+        _cancelSignerProposal();
     }
 
     /**
@@ -186,8 +205,8 @@ contract MonadUpDownAMM {
         uint256 _minBet
     ) external onlyOwner {
         require(_lockBuffer >= 5 && _lockBuffer <= 60, "Invalid lock buffer");
-        require(_priceWindow >= 2 && _priceWindow <= 60, "Invalid price window");
-        require(_emergencyTimeout >= 30 minutes && _emergencyTimeout <= 24 hours, "Invalid emergency timeout");
+        require(_priceWindow >= 1 && _priceWindow <= 60, "Invalid price window");
+        require(_emergencyTimeout >= 5 minutes && _emergencyTimeout <= 24 hours, "Invalid emergency timeout");
         require(_minBet > 0 && _minBet <= 1 ether, "Invalid min bet");
         lockBufferSeconds = _lockBuffer;
         priceWindowSeconds = _priceWindow;
@@ -230,7 +249,7 @@ contract MonadUpDownAMM {
     }
 
     /**
-     * @notice SEC-08: Mark a market as matching a canonical, liquid Pyth feed for its symbol.
+     * @notice SEC-08: Mark a market as matching a canonical, liquid oracle feed for its symbol.
      */
     function setMarketVerified(bytes32 marketId, bool verified) external onlyOwner {
         Market storage market = markets[marketId];
@@ -240,21 +259,21 @@ contract MonadUpDownAMM {
     }
 
     /**
-     * @notice Permissionlessly create ANY new Up/Down AMM market for ANY Pyth Price Feed ID.
+     * @notice Permissionlessly create an Up/Down market for any oracle feed id.
      */
     function createMarket(
-        bytes32 pythFeedId,
+        bytes32 feedId,
         string calldata name,
         string calldata symbol,
         uint256 roundDuration
     ) external returns (bytes32 marketId) {
         require(!paused, "Protocol paused");
-        require(pythFeedId != bytes32(0), "Invalid Pyth Feed ID");
+        require(feedId != bytes32(0), "Invalid feed ID");
         require(roundDuration >= MIN_ROUND_DURATION && roundDuration <= MAX_ROUND_DURATION, "Invalid round duration");
         require(bytes(symbol).length > 0, "Empty symbol");
 
         // Canonical deterministic market key derived from feed ID, symbol, and round duration
-        marketId = keccak256(abi.encodePacked(pythFeedId, symbol, roundDuration));
+        marketId = keccak256(abi.encodePacked(feedId, symbol, roundDuration));
         // SEC-09: existence keyed on creator, not `active`, so a deactivated market can never be
         // re-created and have its round counter reset over live round storage.
         require(markets[marketId].creator == address(0), "Market already exists");
@@ -262,7 +281,7 @@ contract MonadUpDownAMM {
         markets[marketId] = Market({
             marketId: marketId,
             creator: msg.sender,
-            pythFeedId: pythFeedId,
+            feedId: feedId,
             name: name,
             symbol: symbol,
             roundDuration: roundDuration,
@@ -275,7 +294,7 @@ contract MonadUpDownAMM {
 
         allMarketIds.push(marketId);
 
-        emit MarketCreated(marketId, msg.sender, pythFeedId, name, symbol, roundDuration);
+        emit MarketCreated(marketId, msg.sender, feedId, name, symbol, roundDuration);
 
         // Immediately start Round #1 for this newly created market
         _startRound(marketId);
@@ -411,58 +430,53 @@ contract MonadUpDownAMM {
     }
 
     /**
-     * @notice Lock a round. The lock price is PINNED to the first Pyth price published at or after
-     * round.lockTimestamp (SEC-01/02), so neither the caller nor the call time can influence it.
-     * @param priceUpdateData Signed Pyth update(s) for lockTimestamp, e.g. Hermes
-     *        GET /v2/updates/price/{lockTimestamp}. May be empty if the round is uncontested.
+     * @notice Lock a round. The lock price is PINNED to the signed report at the first
+     * priceWindow multiple at/after round.lockTimestamp (SEC-01/02), so neither the caller nor the
+     * call time can influence it. See lockReportTimestamp().
+     * @param reports Signed reports for that timestamp. May be empty if the round is uncontested.
      */
     function lockRoundWithUpdate(
         bytes32 marketId,
         uint256 roundId,
-        bytes[] calldata priceUpdateData
-    ) external payable nonReentrant {
+        SignedPrice[] calldata reports
+    ) external nonReentrant {
         Round storage round = rounds[marketId][roundId];
         require(round.status == RoundStatus.Open, "Not open");
         require(block.timestamp >= round.lockTimestamp, "Lock time not reached");
 
         // SEC-04: no "late lock => cancel" rule. The price is pinned, so lateness gives nobody an option.
-        uint256 feePaid = 0;
         if (round.totalUp == 0 || round.totalDown == 0) {
             round.status = RoundStatus.Cancelled;
             emit RoundCancelled(marketId, roundId, "Uncontested pool: opposite side has zero liquidity");
             _startRoundIfActive(marketId);
         } else {
-            (uint256 price, uint256 publishTime, uint256 fee) =
-                _pinnedPrice(markets[marketId].pythFeedId, priceUpdateData, round.lockTimestamp, round.priceWindow);
-            feePaid = fee;
+            (uint256 price, uint256 publishTime) =
+                _pinnedPrice(markets[marketId].feedId, reports, round.lockTimestamp, round.priceWindow);
             round.lockPrice = price;
             round.lockPublishTime = publishTime;
             round.lockKeeper = msg.sender; // Record keeper for bounty split
             round.status = RoundStatus.Locked;
             emit RoundLocked(marketId, roundId, price);
         }
-
-        _refundExcess(feePaid);
     }
 
     /**
-     * @notice Settle a round. The close price is PINNED to the first Pyth price published at or after
-     * round.closeTimestamp (SEC-01/02). Stored/stale prices are never read.
-     * @param priceUpdateData Signed Pyth update(s) for closeTimestamp, e.g. Hermes
-     *        GET /v2/updates/price/{closeTimestamp}.
+     * @notice Settle a round. The close price is PINNED to the signed report at the first
+     * priceWindow multiple at/after round.closeTimestamp (SEC-01/02). See closeReportTimestamp().
+     * Stored/stale prices are never read.
      */
     function settleRoundWithUpdate(
         bytes32 marketId,
         uint256 roundId,
-        bytes[] calldata priceUpdateData
-    ) external payable nonReentrant {
+        SignedPrice[] calldata reports
+    ) external nonReentrant {
         Round storage round = rounds[marketId][roundId];
         require(round.status == RoundStatus.Locked, "Round not locked");
         require(block.timestamp >= round.closeTimestamp, "Close time not reached");
 
         Market storage market = markets[marketId];
-        (uint256 price, uint256 publishTime, uint256 feePaid) =
-            _pinnedPrice(market.pythFeedId, priceUpdateData, round.closeTimestamp, round.priceWindow);
+        (uint256 price, uint256 publishTime) =
+            _pinnedPrice(market.feedId, reports, round.closeTimestamp, round.priceWindow);
         // Defence in depth: windows cannot overlap (SEC-05 clamp), but never accept a non-later price.
         require(publishTime > round.lockPublishTime, "Close price not after lock price");
 
@@ -501,42 +515,39 @@ contract MonadUpDownAMM {
 
         // Automatically chain-start the next round
         _startRoundIfActive(marketId);
-        _refundExcess(feePaid);
     }
 
     /**
-     * @dev SEC-01/02: Returns the unique first price with lockTs/closeTs <= publishTime <= target + window.
-     * Uses parsePriceFeedUpdatesUnique, which also requires prevPublishTime < target, so exactly one
-     * signed update can ever satisfy it and the caller has no choice among candidate prices.
+     * @dev SEC-01/02: the pinned report timestamp is the first multiple of `interval` at/after
+     * `target`. Exactly one timestamp qualifies, and _verifiedMedian requires every report to carry
+     * it, so the caller has no choice among candidate prices.
      */
-    function _pinnedPrice(
-        bytes32 feedId,
-        bytes[] calldata updateData,
-        uint256 target,
-        uint256 window
-    ) internal returns (uint256 price, uint256 publishTime, uint256 fee) {
-        require(updateData.length > 0, "Price update required");
-        fee = pythOracle.getUpdateFee(updateData);
-        require(msg.value >= fee, "Insufficient Pyth fee");
-
-        bytes32[] memory ids = new bytes32[](1);
-        ids[0] = feedId;
-        IPyth.PriceFeed[] memory feeds = pythOracle.parsePriceFeedUpdatesUnique{value: fee}(
-            updateData, ids, uint64(target), uint64(target + window)
-        );
-        require(feeds.length == 1 && feeds[0].id == feedId, "Oracle returned wrong feed");
-
-        IPyth.Price memory p = feeds[0].price;
-        require(p.publishTime >= target && p.publishTime <= target + window, "Oracle price outside window");
-        price = _normalizePrice(p.price, p.expo);
-        publishTime = p.publishTime;
+    function _pinnedTimestamp(uint256 target, uint256 interval) internal pure returns (uint256) {
+        return ((target + interval - 1) / interval) * interval;
     }
 
-    function _refundExcess(uint256 feePaid) private {
-        if (msg.value > feePaid) {
-            (bool ok, ) = payable(msg.sender).call{value: msg.value - feePaid}("");
-            require(ok, "Excess fee refund failed");
-        }
+    function _pinnedPrice(
+        bytes32 feedId,
+        SignedPrice[] calldata reports,
+        uint256 target,
+        uint256 interval
+    ) internal view returns (uint256 price, uint256 publishTime) {
+        require(reports.length > 0, "Price update required");
+        publishTime = _pinnedTimestamp(target, interval);
+        // 8-decimal oracle value -> 36-decimal price scale used throughout
+        price = _verifiedMedian(feedId, publishTime * 1000, reports) * 1e28;
+    }
+
+    /// @notice Timestamp (seconds) of the report that locks this round; the keeper submits reports for it
+    function lockReportTimestamp(bytes32 marketId, uint256 roundId) external view returns (uint256) {
+        Round storage round = rounds[marketId][roundId];
+        return _pinnedTimestamp(round.lockTimestamp, round.priceWindow);
+    }
+
+    /// @notice Timestamp (seconds) of the report that settles this round
+    function closeReportTimestamp(bytes32 marketId, uint256 roundId) external view returns (uint256) {
+        Round storage round = rounds[marketId][roundId];
+        return _pinnedTimestamp(round.closeTimestamp, round.priceWindow);
     }
 
     function _distributeFees(
@@ -686,26 +697,6 @@ contract MonadUpDownAMM {
         require(success, "Creator fee claim failed");
 
         emit CreatorFeesClaimed(marketId, msg.sender, claimable);
-    }
-
-    /**
-     * @notice Normalizes Pyth signed price with dynamic exponent to ultra-precision 36-decimal scale.
-     * Guarantees zero precision loss, zero truncation for micro-priced tokens (e.g. PEPE, SHIB with expo < -18),
-     * and zero arithmetic overflow up to 77 decimal places.
-     */
-    function _normalizePrice(int64 price, int32 expo) internal pure returns (uint256) {
-        require(price > 0, "Non-positive oracle price");
-        uint256 uPrice = uint256(int256(price));
-        int32 targetDecimals = 36;
-        int32 shift = targetDecimals + expo;
-        if (shift >= 0) {
-            return uPrice * (10 ** uint256(int256(shift)));
-        } else {
-            uint256 divisor = 10 ** uint256(int256(-shift));
-            uint256 normalized = uPrice / divisor;
-            require(normalized > 0, "Price precision underflow");
-            return normalized;
-        }
     }
 
     // =========================================================================

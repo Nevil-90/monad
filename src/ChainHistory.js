@@ -92,13 +92,13 @@ export class ChainHistory {
     this.started = true;
     if (!this.provider || !this.address) {
       this.status = 'error';
-      this.error = 'No contract address configured (VITE_CONTRACT_ADDRESS).';
+      this.error = 'No contract address configured (NEXT_PUBLIC_CONTRACT_ADDRESS).';
       this.notify();
       return;
     }
     if (this.deployBlock === null || !Number.isFinite(this.deployBlock)) {
       this.status = 'error';
-      this.error = 'Contract deploy block not configured (VITE_CONTRACT_DEPLOY_BLOCK).';
+      this.error = 'Contract deploy block not configured (NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK).';
       this.notify();
       return;
     }

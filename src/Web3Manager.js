@@ -495,13 +495,13 @@ export class Web3Manager {
   }
 
   /**
-   * Permissionlessly create a market for a Pyth feed. New markets start unverified (SEC-08).
+   * Permissionlessly create a market for a RedStone feed (e.g. "SUI"). New markets start unverified (SEC-08).
    */
-  async createMarket(pythFeedId, name, symbol, roundDurationSec) {
+  async createMarket(feed, name, symbol, roundDurationSec) {
     if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
     try {
       const data = this.iface.encodeFunctionData('createMarket', [
-        this.formatBytes32(pythFeedId), name, symbol, roundDurationSec
+        ethers.encodeBytes32String(feed), name, symbol, roundDurationSec
       ]);
 
       const txParams = { from: this.account, to: this.contractAddress, data };
@@ -531,7 +531,7 @@ export class Web3Manager {
       return {
         marketId: decoded[0],
         creator: decoded[1],
-        pythFeedId: decoded[2],
+        feedId: decoded[2],
         name: decoded[3],
         symbol: decoded[4],
         roundDuration: Number(decoded[5]),

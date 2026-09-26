@@ -1,7 +1,7 @@
 /**
  * scripts/mutation_check.js
  * Proves the security regression suite actually guards each fix in SECURITY_FIXES.md.
- * For every mutation it re-introduces the original bug into MonadUpDownAMM.sol, recompiles, runs
+ * For every mutation it re-introduces the original bug into the contracts, recompiles, runs
  * test/security_regressions.test.js and expects the matching [SEC-xx] checks to FAIL.
  * The contract is always restored and recompiled afterwards.
  *
@@ -14,17 +14,43 @@ import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const contractPath = path.join(rootDir, 'contracts', 'MonadUpDownAMM.sol');
-const original = fs.readFileSync(contractPath, 'utf8');
+const FILES = {
+  amm: path.join(rootDir, 'contracts', 'MonadUpDownAMM.sol'),
+  oracle: path.join(rootDir, 'contracts', 'SignedPriceOracle.sol')
+};
+const originals = Object.fromEntries(Object.entries(FILES).map(([k, f]) => [k, fs.readFileSync(f, 'utf8')]));
 
 const MUTATIONS = [
   {
     id: 'SEC-01/02',
-    name: 'Old +/-60s staleness tolerance instead of pinning to the target timestamp',
-    from: 'updateData, ids, uint64(target), uint64(target + window)',
-    to: 'updateData, ids, uint64(target - 60), uint64(target + 60)',
-    extra: [['require(p.publishTime >= target && p.publishTime <= target + window, "Oracle price outside window");', '']],
+    name: 'Accept reports from any time within +/-60s instead of the pinned timestamp',
+    file: 'oracle',
+    from: 'require(r.timestampMs == timestampMs, "Report not at pinned timestamp");',
+    to: 'require(r.timestampMs + 60000 >= timestampMs && r.timestampMs <= timestampMs + 60000, "Report not at pinned timestamp");',
     expect: ['SEC-01', 'SEC-02']
+  },
+  {
+    id: 'SEC-02 (signers)',
+    name: 'Accept any 3 signatures, letting the keeper choose which nodes form the median',
+    file: 'oracle',
+    from: 'require(n >= signerThreshold, "Not enough oracle signatures");',
+    to: 'require(n >= 3, "Not enough oracle signatures");',
+    expect: ['SEC-02']
+  },
+  {
+    id: 'SEC-22',
+    name: 'Apply an oracle signer change without the timelock',
+    file: 'oracle',
+    from: 'require(block.timestamp >= _proposal.eta, "Signer change still timelocked");',
+    to: '',
+    expect: ['SEC-22']
+  },
+  {
+    id: 'SEC-21',
+    name: 'Old 2-hour emergency timeout',
+    from: 'uint256 public emergencyTimeout = 10 minutes;',
+    to: 'uint256 public emergencyTimeout = 2 hours;',
+    expect: ['SEC-21']
   },
   {
     id: 'SEC-03',
@@ -75,12 +101,13 @@ function run(cmd) {
 let allCaught = true;
 try {
   for (const m of MUTATIONS) {
-    let src = original;
+    const file = m.file || 'amm';
+    let src = originals[file];
     for (const [from, to] of [[m.from, m.to], ...(m.extra || [])]) {
       if (!src.includes(from)) throw new Error(`[${m.id}] mutation anchor not found (contract changed?): ${from}`);
       src = src.replace(from, to);
     }
-    fs.writeFileSync(contractPath, src);
+    fs.writeFileSync(FILES[file], src);
 
     const compiled = run('node scripts/compile.js');
     if (!compiled.ok) throw new Error(`[${m.id}] mutant failed to compile:\n${compiled.out}`);
@@ -89,9 +116,10 @@ try {
     const caught = m.expect.every((id) => failedIds.has(id));
     allCaught &&= caught;
     console.log(`${caught ? '[CAUGHT]' : '\x1b[31m[MISSED]\x1b[0m'} ${m.id}: ${m.name} -> failing: ${[...failedIds].join(', ') || 'none'}`);
+    fs.writeFileSync(FILES[file], originals[file]);
   }
 } finally {
-  fs.writeFileSync(contractPath, original);
+  for (const [k, f] of Object.entries(FILES)) fs.writeFileSync(f, originals[k]);
   run('node scripts/compile.js');
 }
 

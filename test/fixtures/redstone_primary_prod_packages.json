@@ -1,0 +1,156 @@
+{
+ "BTC": [
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "o0JUCMMBOw2tscsUAcZz4sA5bcJzVlchAIWhgKLsp8EnJCvPKvh5+tJgpU12Y+zvkldDwjn+YNTVqJkBQcYkjRs=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "BTC",
+     "value": 84161.4084229
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "BTC",
+   "signerAddress": "0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE",
+   "dataFeedId": "BTC"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "pGWNw8JpDIrLnivZuTm3pdCWq/QLuz0AQLrKDjSRZ0YAiMt5YjDcYX1bgszjK5jWREFT7Cqb3s6BxWw0ZBBqTRw=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "BTC",
+     "value": 84161.4084229
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "BTC",
+   "signerAddress": "0xdEB22f54738d54976C4c0fe5ce6d408E40d88499",
+   "dataFeedId": "BTC"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "8ixhXCvMj/gO1cnDfxTqC8Xe0uNVgF3OmaWiRa0OkZ48+K2li9k6eipcoVImSNeGBMUpinKHFgzL/FpY0AdeZxw=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "BTC",
+     "value": 84161.4084229
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "BTC",
+   "signerAddress": "0x51Ce04Be4b3E32572C4Ec9135221d0691Ba7d202",
+   "dataFeedId": "BTC"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "kW0ZD0234PhyRoBa4Fji6fOAUbMje2MksU+IxeFrqHdLjrD3TKwJXLQr3rah5+OA9kZX5XjFuiwk+9697Nazxhs=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "BTC",
+     "value": 84161.4084229
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "BTC",
+   "signerAddress": "0x9c5AE89C4Af6aA32cE58588DBaF90d18a855B6de",
+   "dataFeedId": "BTC"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "757UQiBY2S5Uv2e8C7AObMEEQINXnPtskJ3WEqVjGo4sTGqZQ4fRY06Njuzz4kciV9pl7qVxtmU9vyFElj/bHxw=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "BTC",
+     "value": 84161.4084229
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "BTC",
+   "signerAddress": "0x8BB8F32Df04c8b654987DAaeD53D6B6091e3B774",
+   "dataFeedId": "BTC"
+  }
+ ],
+ "MON": [
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "/U5ejaBb9NlFL4tQUHX7ALtK3gSlALdUHPR0Zczhi6oL5mk9UzHWSvpgnVND+HASGnr0UYrazH/67hG8aAkI6Bw=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "MON",
+     "value": 0.02669386
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "MON",
+   "signerAddress": "0xDD682daEC5A90dD295d14DA4b0bec9281017b5bE",
+   "dataFeedId": "MON"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "Vq//x0ZzydW90Dv3RaKnzXPZ6PC7jWdDECZAuzfAXh1ZfTA2xtKKjhwrACGT96ph41SnH5czgHjVoyb4OcQdSxs=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "MON",
+     "value": 0.02669386
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "MON",
+   "signerAddress": "0xdEB22f54738d54976C4c0fe5ce6d408E40d88499",
+   "dataFeedId": "MON"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "mszhScYYTdn6SKnwzFpehigsCQcGS5zGgKEy3lOpZCh1oj7x4Erd/j7JZgspUK5ssgues/6VAhXfExoFFwB8MBs=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "MON",
+     "value": 0.02669386
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "MON",
+   "signerAddress": "0x51Ce04Be4b3E32572C4Ec9135221d0691Ba7d202",
+   "dataFeedId": "MON"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "gG/8H4Dd737Ce2RI5Wr46W5RXzWg2htrQQobPRswfElqirNHIiVnDP1mpwsEbK+PJT2MfbU8F/zmrCq58+KRJhw=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "MON",
+     "value": 0.02669386
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "MON",
+   "signerAddress": "0x9c5AE89C4Af6aA32cE58588DBaF90d18a855B6de",
+   "dataFeedId": "MON"
+  },
+  {
+   "timestampMilliseconds": 1790421980000,
+   "signature": "0kO/gpDyDBSRbRaxewP4Pit43zKXIje0wYHL0gFTpBcu6FH+4Sic5JXjztbJEgEyqNsRx0XFPINcEoR+jOKUURs=",
+   "isSignatureValid": true,
+   "dataPoints": [
+    {
+     "dataFeedId": "MON",
+     "value": 0.02669386
+    }
+   ],
+   "dataServiceId": "redstone-primary-prod",
+   "dataPackageId": "MON",
+   "signerAddress": "0x8BB8F32Df04c8b654987DAaeD53D6B6091e3B774",
+   "dataFeedId": "MON"
+  }
+ ]
+}

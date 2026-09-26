@@ -1,8 +1,9 @@
 /**
  * PriceStore.js
  * Price history shared by the line and candle views: 1s and 1m OHLC(V) bars, preloaded from the
- * same source as live prices (the Pyth relay, or Binance klines in fallback mode), then updated
- * from live ticks. Pyth has no trade volume, so the volume strip stays empty in Pyth mode.
+ * same source as live prices (the RedStone relay, or Binance klines when Binance is chosen), then
+ * updated from live ticks. RedStone reports come every 10 seconds and carry no trade volume, so in
+ * RedStone mode points are 10s apart and the volume strip stays empty.
  */
 
 import { API_CONFIG } from './config.js';
@@ -22,18 +23,31 @@ export class PriceStore {
     this.bars1m = [];
   }
 
-  /** Preload history from the active price source for a market ({ pythId, binanceTradeStream }) */
+  /** Preload history from the active price source for a market ({ feed, binanceTradeStream }) */
   async load(market) {
     const token = ++this.loadToken;
     this.reset();
     if (!market) return;
+    if (API_CONFIG.priceSource === 'redstone') {
+      try {
+        const res = await fetch(`${API_CONFIG.priceRelayUrl}/history?feed=${market.feed}`);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const points = await res.json();
+        if (token !== this.loadToken) return;
+        const live = { s: this.bars1s, m: this.bars1m };
+        this.bars1s = [];
+        this.bars1m = [];
+        for (const [t, p] of points) this.push(p, 0, t);
+        this.bars1s = this.merge(this.bars1s, live.s);
+        this.bars1m = this.merge(this.bars1m, live.m);
+      } catch (err) {
+        console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
+      }
+      return;
+    }
     let urls;
     let parse;
-    if (API_CONFIG.priceRelayUrl) {
-      const base = `${API_CONFIG.priceRelayUrl.replace(/\/$/, '')}/history?id=${market.pythId}`;
-      urls = [`${base}&tf=1s`, `${base}&tf=1m`];
-      parse = (rows) => rows.map((b) => ({ t: b[0], o: b[1], h: b[2], l: b[3], c: b[4], v: 0 }));
-    } else if (market.binanceTradeStream) {
+    if (API_CONFIG.priceSource === 'binance' && market.binanceTradeStream) {
       const base = `${API_CONFIG.binanceRestUrl}/klines?symbol=${market.binanceTradeStream.split('@')[0].toUpperCase()}`;
       urls = [`${base}&interval=1s&limit=1000`, `${base}&interval=1m&limit=500`];
       parse = (rows) => rows.map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));

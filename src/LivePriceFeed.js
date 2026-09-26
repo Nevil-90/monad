@@ -2,14 +2,14 @@
  * LivePriceFeed.js
  * Live prices for the UI.
  *
- * Pyth, streamed through scripts/price_relay.js (VITE_PRICE_RELAY_URL). This is the same oracle the
- * contract settles on, so the price users watch is the price that decides the round.
- * Binance public streams only when chosen explicitly (VITE_PRICE_SOURCE=binance). Binance has no MON
- * market, so MON/USD is shown as unavailable in that mode instead of being approximated.
+ * RedStone, streamed through scripts/price_relay.js (NEXT_PUBLIC_PRICE_RELAY_URL). This is the oracle
+ * the contract settles on, and the relay sends the same median of all signers the contract computes,
+ * so the price users watch is the price that decides the round. New reports arrive every 10 seconds.
+ * Binance public streams only when chosen explicitly (NEXT_PUBLIC_PRICE_SOURCE=binance). Binance has
+ * no MON market, so MON/USD is shown as unavailable in that mode instead of being approximated.
  * The source never switches on its own: if the chosen one is down, the UI shows it as down.
  *
- * Latency is measured, not simulated: time from Binance's trade time to its arrival here. Pyth publish
- * times have 1s resolution, so no latency figure is shown for Pyth.
+ * Latency is measured, not simulated: the age of the price when it arrives here.
  */
 
 import { API_CONFIG, SUPPORTED_MARKETS } from './config.js';
@@ -19,13 +19,9 @@ const finiteOrNull = (v) => (Number.isFinite(parseFloat(v)) ? parseFloat(v) : nu
 const BINANCE_SYMBOLS = { BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL' };
 
 export class LivePriceFeed {
-  static usesPyth() {
-    return API_CONFIG.priceSource === 'pyth';
-  }
-
   /** Markets the configured source cannot price, with the reason shown to the user */
   static unavailableMarkets() {
-    if (API_CONFIG.priceSource === 'binance') return { MON: 'MON/USD is priced by Pyth only. Connect the Pyth relay to trade it.' };
+    if (API_CONFIG.priceSource === 'binance') return { MON: 'MON/USD is priced by RedStone only. Connect the price relay to trade it.' };
     return {};
   }
 
@@ -35,16 +31,16 @@ export class LivePriceFeed {
     this.isConnected = false;
     this.lastTickTime = 0;
     this.latencyMs = null;
-    this.source = { pyth: 'Pyth', binance: 'Binance' }[API_CONFIG.priceSource] || null;
+    this.source = { redstone: 'RedStone', binance: 'Binance' }[API_CONFIG.priceSource] || null;
     this.prices = {};
     this.stats24h = {};
     for (const k of Object.keys(SUPPORTED_MARKETS)) {
       this.prices[k] = 0;
       this.stats24h[k] = { change: null };
     }
-    this.marketByFeed = new Map(Object.entries(SUPPORTED_MARKETS).map(([k, m]) => [m.pythId.toLowerCase(), k]));
+    this.marketByFeed = new Map(Object.entries(SUPPORTED_MARKETS).map(([k, m]) => [m.feed, k]));
 
-    if (this.source === 'Pyth') this.connectPyth();
+    if (this.source === 'RedStone') this.connectRelay();
     else if (this.source === 'Binance') this.connectBinance();
     else {
       // Deferred so listeners wired in the caller's constructor receive it
@@ -52,9 +48,10 @@ export class LivePriceFeed {
       return;
     }
 
-    // Report staleness if the stream goes quiet
+    // Report staleness if the stream goes quiet (RedStone publishes every 10s)
+    const staleAfter = this.source === 'RedStone' ? 30000 : 10000;
     this.watchdog = setInterval(() => {
-      const stale = Date.now() - this.lastTickTime > 10000;
+      const stale = Date.now() - this.lastTickTime > staleAfter;
       if (stale && this.isConnected) {
         this.isConnected = false;
         this.updateStatus();
@@ -63,19 +60,18 @@ export class LivePriceFeed {
   }
 
   // ---------------------------------------------------------------------------
-  // Pyth via relay (Server-Sent Events)
+  // RedStone via relay (Server-Sent Events)
   // ---------------------------------------------------------------------------
-  connectPyth() {
-    const base = API_CONFIG.priceRelayUrl.replace(/\/$/, '');
-    this.es = new EventSource(`${base}/stream`);
+  connectRelay() {
+    this.es = new EventSource(`${API_CONFIG.priceRelayUrl}/stream`);
 
     const applySnapshot = (e, initial) => {
       try {
         const snap = JSON.parse(e.data);
-        for (const [id, f] of Object.entries(snap)) {
-          const k = this.marketByFeed.get(id.toLowerCase());
+        for (const [feed, f] of Object.entries(snap)) {
+          const k = this.marketByFeed.get(feed);
           if (!k) continue;
-          if (f.change24h !== null && f.change24h !== undefined) this.stats24h[k] = { change: f.change24h };
+          this.stats24h[k] = { change: f.change24h ?? null };
           if (initial && f.p > 0) {
             this.prices[k] = f.p;
             this.dispatchTick(k, f.p, 0, f.t, true);
@@ -90,12 +86,13 @@ export class LivePriceFeed {
     this.es.addEventListener('stats', (e) => applySnapshot(e, false));
     this.es.onmessage = (e) => {
       try {
-        const { id, p, t } = JSON.parse(e.data);
-        const k = this.marketByFeed.get(String(id).toLowerCase());
-        if (!k || !(p > 0)) return;
+        const { feed, p, t } = JSON.parse(e.data);
+        const k = this.marketByFeed.get(feed);
+        if (!k || !(p > 0) || !Number.isFinite(t)) return;
         this.prices[k] = p;
-        // Pyth publish times have 1s resolution, so no millisecond latency is claimed for them
+        this.latencyMs = Math.max(0, Date.now() - t);
         this.dispatchTick(k, p, 0, t, false);
+        this.updateStatus();
       } catch (_) {
         // Ignore malformed ticks
       }

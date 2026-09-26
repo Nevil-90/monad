@@ -36,7 +36,7 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-08 | Medium | Market spoofing: any feed can be listed under any name/symbol | 🟡 Partial | `[SEC-08]` | — |
 | SEC-09 | Critical (latent) | Re-creating a deactivated market would reset its round counter over live storage | ✅ Fixed | `[SEC-09]` | ✅ |
 | SEC-10 | Medium | Private keys accepted as CLI args (leak to shell history / `ps`) | ✅ Fixed | `[SEC-10]` | — (static check) |
-| SEC-11 | Medium | Keeper economics: bounty often below gas + Pyth fee on small pools | ⬜ Open | — | — |
+| SEC-11 | Medium | Keeper economics: bounty often below gas on small pools | ⬜ Open | — | — |
 | SEC-12 | Info | Rounding dust (< 1 wei per winning claim) stays in the contract | ➖ Won't fix | — | — |
 | SEC-13 | Info | "AntiScrapeShield" / "CircuitBreaker" are browser-only, not security controls | ➖ Won't fix | — | — |
 | SEC-14 | Medium | JS simulation scripts model the old contract, not the fixed one | ⬜ Open | — | — |
@@ -46,6 +46,9 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-18 | Low | Settle costs ~505k gas (next-round storage writes); keeper used a fixed 350k limit | 🟡 Partial | — | — |
 | SEC-19 | Medium | Bet sent even when switching the wallet to Monad failed (tx went to whatever chain the wallet was on) | ✅ Fixed | — (manual, browser) | — |
 | SEC-20 | Medium | Silent fallbacks replaced real data with invented or wrong values (see details) | ✅ Fixed | — (manual + script runs) | — |
+| SEC-21 | Medium | Free oracle gateway keeps no past reports: an uncaptured round could only refund after 2 h | ✅ Fixed | `[SEC-21]` | ✅ |
+| SEC-22 | High | Oracle signer set is owner-controlled: an instant swap would let the owner forge prices | ✅ Fixed | `[SEC-22]` | ✅ |
+| SEC-23 | High (legal) | RedStone's own contract library is BUSL-1.1; free production use of its data is unconfirmed | 🟡 Partial | — | — |
 
 ---
 
@@ -53,17 +56,15 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 
 ### SEC-01: Stale-price forced tie (Critical) ✅
 **Bug.** `settleRound()` read Pyth's *stored* price via `getPriceNoOlderThan(id, 60)`. With 30–60s rounds, if nobody pushed a new update after lock, the stored price was still the lock price. A losing bettor called `settleRound()` right at close, `closePrice == lockPrice` counted as a tie, and every bettor got a 100% refund. Losers could void any round they were losing.
-**Fix.** Removed `lockRound()` / `settleRound()` (the no-update versions). Lock and settle now *require* signed update data, parsed with `parsePriceFeedUpdatesUnique`. They never read stored state. Settle also requires `closePublishTime > lockPublishTime`.
-**Files.** `contracts/MonadUpDownAMM.sol` (`settleRoundWithUpdate`, `_pinnedPrice`), `contracts/IPyth.sol`
+**Fix.** Removed `lockRound()` / `settleRound()` (the no-update versions). Lock and settle now *require* signed reports for the round's pinned timestamp. They never read stored state. Settle also requires `closePublishTime > lockPublishTime`. (Since 2026-09-26 the reports are RedStone's, verified in `SignedPriceOracle.sol`; see SEC-22.)
+**Files.** `contracts/MonadUpDownAMM.sol` (`settleRoundWithUpdate`, `_pinnedPrice`), `contracts/SignedPriceOracle.sol`
 **Test.** `[SEC-01]`: no stored-price settle function exists in the ABI; empty update reverts; replaying the lock update as the close reverts; a pre-close price reverts.
 
 ### SEC-02: Keeper price selection (Critical) ✅
 **Bug.** Lock was allowed anywhere in `[lockTs, lockTs+30s]` and settle in `[closeTs, closeTs+120s]`, each with any price ≤ 60s old. A bettor running a keeper chose favourable prices from a window larger than the round, including lock prices already known before betting closed.
-**Fix.** Each price is pinned to the **first Pyth price published at or after** the round's `lockTimestamp` / `closeTimestamp` (`publishTime ≥ target > prevPublishTime`, and `publishTime ≤ target + priceWindow`). Exactly one signed update can satisfy this, so who calls and when no longer matters. `closeTimestamp` is now the fixed `lockTimestamp + roundDuration`; it is no longer reset at lock time. Publish times are stored in `round.lockPublishTime` / `round.closePublishTime` for auditability.
-**Files.** `MonadUpDownAMM.sol` (`_pinnedPrice`, `lockRoundWithUpdate`, `settleRoundWithUpdate`), `MockPythOracle.sol`, `scripts/keeper_bot.js` (fetches `Hermes /v2/updates/price/{timestamp}`)
-**Test.** `[SEC-02]`: pre-lock price, non-first price, out-of-window price and wrong-feed price are all rejected. A late lock still gets the exact pinned price. The settler can't substitute a later, favourable price.
-**Before mainnet.**
-- [ ] Confirm the Pyth contract on Monad exposes `parsePriceFeedUpdatesUnique`.
+**Fix.** Each price is pinned to one report timestamp: the first multiple of `priceWindow` (10 s, RedStone's publishing interval) at or after the round's `lockTimestamp` / `closeTimestamp`. Every submitted report must carry exactly that timestamp, and **all** authorised signers must sign (5 of 5 by default), so the keeper can choose neither the time nor which nodes' values form the median. Who calls and when no longer matters. (Originally built on Pyth's `parsePriceFeedUpdatesUnique`; moved to RedStone on 2026-09-26.) `closeTimestamp` is now the fixed `lockTimestamp + roundDuration`; it is no longer reset at lock time. Publish times are stored in `round.lockPublishTime` / `round.closePublishTime` for auditability.
+**Files.** `MonadUpDownAMM.sol` (`_pinnedPrice`, `lockReportTimestamp`, `closeReportTimestamp`), `SignedPriceOracle.sol` (`_verifiedMedian`), `scripts/keeper_bot.js`
+**Test.** `[SEC-02]`: pre-lock reports, next-mark reports, a set mixing timestamps, other-feed reports and a chosen 3-of-5 subset are all rejected. A late lock still gets the exact pinned price. The settler can't substitute a later, favourable price. `test/contract_evm.test.js` also locks a round with real reports captured from RedStone's gateway.
 - [ ] Confirm Hermes `GET /v2/updates/price/{publish_time}` returns the first update at/after that time. The keeper pre-checks and the contract enforces it, so a wrong update only reverts and loses no funds.
 
 ### SEC-03: Gas-griefing locker (High) ✅
@@ -145,13 +146,33 @@ Failures used to be hidden behind substitute values. Each one now fails visibly 
 - [x] Config: the default contract address pointed at an address with no AMM deployed; mainnet reused the testnet contract and Pyth addresses; unknown networks became testnet. None of these have defaults now (see `.env.example`).
 - [x] UI: hardcoded 24h changes, fee values invented when the contract read failed, a `0.00` balance when the balance was unknown, and a price feed that switched to Binance on its own. Unknown values now show "—", and the price source is explicit.
 
+### SEC-21: No past oracle reports (Medium) ✅
+**Issue.** Settlement moved to RedStone's free gateway (no API key), which serves only the latest report set, every 10 s, published about 12 s after its timestamp. A report that nobody captured can never be fetched later, so the round cannot be locked or settled. With the old 2-hour `emergencyTimeout`, its bettors' funds sat idle and the market stopped for 2 hours.
+**Fix.** `emergencyTimeout` defaults to 10 minutes (range 5 min–24 h). The keeper runs continuously and archives every report (`scripts/lib/report_archive.js`); the relay keeps its own archive and serves it at `/reports`, so anyone can lock or settle. The keeper also calls `emergencyRefund` on rounds past the timeout so markets keep moving.
+**Residual.** If a round's report is captured by nobody at all, the round is refunded in full. A losing bettor who is the *only* party holding the report could withhold it to force that refund; running the keeper and the relay (two independent archives) makes this impractical.
+**Test.** `[SEC-21]`: default is 10 min; refund is refused before, allowed after; the market chains a new round.
+
+### SEC-22: Owner-controlled oracle signers (High) ✅
+**Issue.** Our own verifier (`SignedPriceOracle.sol`) checks signatures against a signer list stored in the contract. An owner able to replace that list instantly could add their own key and settle any round at a forged price.
+**Fix.** Signers change only through `proposeOracleSigners` → a public `OracleSignersProposed` event → `applyOracleSigners` after `ORACLE_CHANGE_DELAY` (2 days), cancellable. The threshold must be a strict majority. Users have two days to stop betting before any change applies. Default set: RedStone's 5 primary-prod nodes, all 5 required (no signer-subset choice, see SEC-02).
+**Test.** `[SEC-22]`: non-owner can't propose; a minority threshold is rejected; an immediate apply reverts; reports from the proposed key are rejected while pending; a cancelled proposal can't be applied; a legitimate rotation applies after 2 days.
+**Before mainnet.**
+- [ ] Put the owner behind a multisig as well (SEC-16).
+
+### SEC-23: Oracle licence and terms (High, legal) 🟡
+RedStone's EVM connector package ships its Solidity under **BUSL-1.1** (its package.json says MIT; the licence grant text is not included). We do not use that code: `SignedPriceOracle.sol` is an independent MIT implementation of the public data-package format. Whether RedStone's free gateway data may be used in production without an agreement is **not confirmed**.
+- [x] No RedStone library code in the contracts.
+- [ ] Get written confirmation from RedStone that production use of `redstone-primary-prod` via the public gateway is allowed, or agree terms.
+- [ ] Re-check the signer set before deploy (`src/oracle.js`; `npm run deploy -- --dry-run` verifies all 5 sign right now).
+
 ---
 
 ## Breaking changes introduced by these fixes
 
-The contract is not upgradeable. **These fixes require a fresh deployment**, then `VITE_CONTRACT_ADDRESS` and `VITE_CONTRACT_DEPLOY_BLOCK` set to the values `scripts/deploy.js` prints.
+The contract is not upgradeable. **These fixes require a fresh deployment**, then `NEXT_PUBLIC_CONTRACT_ADDRESS` and `NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK` set to the values `npm run deploy` prints.
 
 - Removed: `lockRound(bytes32,uint256)`, `settleRound(bytes32,uint256)`, `maxLockDelay`, `maxSettleDelay`, `oracleMaxStaleness`, `MAX_LOCK_DELAY()`, `MAX_SETTLE_DELAY()`, `ORACLE_MAX_STALENESS()`, the 5- and 6-arg `setProtocolParameters`.
+- Changed (2026-09-26, RedStone): the constructor takes `(address[] signers, uint256 threshold)`; `lockRoundWithUpdate` / `settleRoundWithUpdate` take `SignedPrice[]` reports and are no longer payable (no oracle fee); `Market.pythFeedId` is now `feedId` (e.g. `bytes32("BTC")`), which changes every market ID. Added `lockReportTimestamp`, `closeReportTimestamp`, `oracleSigners`, `signerThreshold`, `proposeOracleSigners`, `applyOracleSigners`, `cancelOracleSignersProposal`, `pendingOracleSigners`.
 - Changed: `lockRoundWithUpdate` / `settleRoundWithUpdate` now require a pinned update for a contested round. `setProtocolParameters(lockBuffer, priceWindow, emergencyTimeout, minBet)`. `transferOwnership` is now two-step. Keeper bounties are pulled, not pushed.
 - Added: `claimKeeperRewards`, `keeperRewards`, `priceWindowSeconds`, `setPaused` / `paused`, `setMarketActive`, `setMarketVerified`, `pendingOwner`, `acceptOwnership`.
 - `Round` gained `betCloseTimestamp, priceWindow, lockPublishTime, closePublishTime, upBettors, downBettors`, and `Market` gained `verified`, all **appended** so existing index-based decoders keep working.
@@ -162,6 +183,7 @@ The contract is not upgradeable. **These fixes require a fresh deployment**, the
 
 | Date | ID(s) | Change |
 |---|---|---|
+| 2026-09-26 | SEC-01, 02, 21, 22, 23 | Settlement moved from Pyth (API key required since 2026-08-26) to RedStone's free signed reports, verified by our own `SignedPriceOracle.sol`. SEC-01/02 re-proven on the new oracle; added SEC-21/22 with tests and mutations. Suites: invariants 75/75, EVM 42/42 (incl. real RedStone packages on-chain), security 52/52, mutations 9/9 caught. |
 | 2026-09-26 | SEC-19, SEC-20 | Removed silent fallbacks across keeper, deploy, config and UI; bets blocked when the network switch fails. All suites pass (80/80, 33/33, 39/39; 6/6 mutations caught). |
 | 2026-09-26 | — | UI redesign (Horizon). Contract additions for the UI: `totalWinnings`, per-round `upBettors` / `downBettors`. All suites pass (EVM 33/33, security 39/39). |
 | 2026-09-26 | SEC-01 … SEC-18 | Initial review. Fixed SEC-01–07, 09, 10; partial SEC-08, 18; opened SEC-11, 14–17; won't-fix SEC-12, 13. Added `test/security_regressions.test.js` (39 checks) and `scripts/mutation_check.js` (6 mutations, all caught). |

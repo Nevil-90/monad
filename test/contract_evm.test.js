@@ -4,7 +4,7 @@
  * 
  * Runs on in-memory Ganache EVM using real compiled bytecode from build/
  * Verifies all security fixes and protocol invariants on the actual EVM:
- * 1. Contract deployment & Pyth mock wiring
+ * 1. Contract deployment with an oracle signer set
  * 2. Permissionless market creation & Round #1 auto-initialization
  * 3. Bidirectional betting (Up & Down) with storage checks
  * 4. Slippage / Min-odds protection against pool sniping (VULN-03)
@@ -14,7 +14,8 @@
  * 8. 100% fee snapshotting invariance across rounds (VULN-04)
  * 9. Dual-keeper bounty accrual + pull withdrawal (SEC-03)
  * 10. Winner payout claims & 100% solvency proof
- * 11. Excess Pyth update fee auto-refund (VULN-05)
+ * 11. Signed oracle reports: pinned timestamp, signer threshold, duplicates, median
+ * 12. Real RedStone packages (captured from the free gateway) verify on-chain
  */
 
 import fs from 'fs';
@@ -22,6 +23,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import ganache from 'ganache';
 import { ethers } from 'ethers';
+import { signReport, parsePackage, feedIdBytes32, medianUnits, REDSTONE_PRIMARY_SIGNERS } from '../src/oracle.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,13 +80,14 @@ async function runEvmTests() {
     };
   }
 
-  // Mock Pyth update payload: the first price published at/after `target` (prevPublishTime < target)
-  function pythUpdate(feedId, price, target, offset = 1, expo = -8) {
-    return ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'int64', 'uint64', 'int32', 'uint64', 'uint64'],
-      [feedId, price, 8n, expo, BigInt(target) + BigInt(offset), BigInt(target) - 1n]
-    );
-  }
+  // Local oracle network: 5 signing keys, all required (the production default)
+  const signerKeys = [1, 2, 3, 4, 5].map((i) => new ethers.SigningKey(ethers.id(`oracle-signer-${i}`)));
+  const signerAddrs = signerKeys.map((k) => ethers.computeAddress(k.publicKey));
+  const INTERVAL = 10n;
+  const pinned = (target) => ((BigInt(target) + INTERVAL - 1n) / INTERVAL) * INTERVAL;
+  // Every signer's report for the pinned timestamp of `target` (8-decimal price)
+  const reports = (price, target, keys = signerKeys) =>
+    keys.map((k) => signReport(k, 'BTC', price, pinned(target) * 1000n));
 
   // Exact raw balance query avoiding BrowserProvider client-side cache
   async function getBalance(addr) {
@@ -94,32 +97,22 @@ async function runEvmTests() {
   }
 
   // 2. Load ABIs and Bytecodes
-  const pythAbi = JSON.parse(fs.readFileSync(path.join(buildDir, 'MockPythOracle_sol_MockPythOracle.abi'), 'utf8'));
-  let pythBytecode = fs.readFileSync(path.join(buildDir, 'MockPythOracle_sol_MockPythOracle.bin'), 'utf8');
-  if (!pythBytecode.startsWith('0x')) pythBytecode = `0x${pythBytecode}`;
-
   const ammAbi = JSON.parse(fs.readFileSync(path.join(buildDir, 'MonadUpDownAMM_sol_MonadUpDownAMM.abi'), 'utf8'));
   let ammBytecode = fs.readFileSync(path.join(buildDir, 'MonadUpDownAMM_sol_MonadUpDownAMM.bin'), 'utf8');
   if (!ammBytecode.startsWith('0x')) ammBytecode = `0x${ammBytecode}`;
 
-  // 3. Deploy MockPythOracle
+  // 3. Deploy MonadUpDownAMM with the oracle signer set
   console.log('--- Step 1: Deploying Contracts onto EVM ---');
-  const pythFactory = new ethers.ContractFactory(pythAbi, pythBytecode, owner);
-  const pyth = await pythFactory.deploy();
-  await pyth.waitForDeployment();
-  const pythAddr = await pyth.getAddress();
-  assert(Boolean(pythAddr && pythAddr.startsWith('0x')), `MockPythOracle deployed at ${pythAddr}`);
-
-  // 4. Deploy MonadUpDownAMM
   const ammFactory = new ethers.ContractFactory(ammAbi, ammBytecode, owner);
-  const amm = await ammFactory.deploy(pythAddr);
+  const amm = await ammFactory.deploy(signerAddrs, 5);
   await amm.waitForDeployment();
   const ammAddr = await amm.getAddress();
   assert(Boolean(ammAddr && ammAddr.startsWith('0x')), `MonadUpDownAMM deployed at ${ammAddr}`);
+  assert((await amm.signerThreshold()) === 5n && (await amm.oracleSigners()).length === 5, 'Oracle signer set registered (5 signers, all required)');
 
   // Test 1: Permissionless Market Creation & Round #1 Initialization
   console.log('\n--- Step 2: Market Creation & Round Initialization ---');
-  const btcFeedId = ethers.keccak256(ethers.toUtf8Bytes('BTC/USD'));
+  const btcFeedId = feedIdBytes32('BTC');
   const roundDuration = 60; // 60s rounds
   
   const createTx = await amm.connect(creator).createMarket(btcFeedId, 'Bitcoin', 'BTC/USD', roundDuration);
@@ -194,15 +187,14 @@ async function runEvmTests() {
 
   // Keeper 1 locks the round with the price pinned to lockTimestamp
   const lockPriceInitial = 6425000000000n; // $64,250
-  const lockTx = await amm.connect(keeper1).lockRoundWithUpdate(
-    marketId, 1, [pythUpdate(btcFeedId, lockPriceInitial, r1.lockTimestamp)], { value: 1n }
-  );
+  const lockTx = await amm.connect(keeper1).lockRoundWithUpdate(marketId, 1, reports(lockPriceInitial, r1.lockTimestamp));
   await lockTx.wait();
 
   r1 = await amm.rounds(marketId, 1);
   assert(Number(r1.status) === 2, 'Round #1 successfully locked (status = 2)');
   assert(r1.lockKeeper === (await keeper1.getAddress()), 'Keeper 1 recorded as lock keeper for 50% gas bounty');
-  assert(r1.lockPublishTime === r1.lockTimestamp + 1n, 'Lock price pinned to first Pyth update at/after lockTimestamp');
+  assert(r1.lockPublishTime === pinned(r1.lockTimestamp), 'Lock price pinned to the report at the first 10s mark at/after lockTimestamp');
+  assert(r1.lockPrice === lockPriceInitial * 10n ** 28n, 'Lock price stored at 36-decimal scale');
 
   // Invariant: observation window is the fixed schedule [lockTimestamp, lockTimestamp + roundDuration]
   assert(r1.closeTimestamp === r1.lockTimestamp + BigInt(roundDuration), 'Observation window is exactly one full 60s duration');
@@ -215,9 +207,7 @@ async function runEvmTests() {
   const closePriceSurge = 6550000000000n;
 
   // Keeper 2 calls settle
-  const settleTx = await amm.connect(keeper2).settleRoundWithUpdate(
-    marketId, 1, [pythUpdate(btcFeedId, closePriceSurge, r1.closeTimestamp)], { value: 1n }
-  );
+  const settleTx = await amm.connect(keeper2).settleRoundWithUpdate(marketId, 1, reports(closePriceSurge, r1.closeTimestamp));
   await settleTx.wait();
 
   r1 = await amm.rounds(marketId, 1);
@@ -279,16 +269,12 @@ async function runEvmTests() {
   const r2Info = await amm.rounds(marketId, 2);
   const curBlk2 = await getLatestBlock();
   await increaseTime(Number(r2Info.lockTimestamp) - curBlk2.timestamp + 5);
-  await (await amm.connect(keeper1).lockRoundWithUpdate(
-    marketId, 2, [pythUpdate(btcFeedId, 6425000000000n, r2Info.lockTimestamp)], { value: 1n }
-  )).wait();
+  await (await amm.connect(keeper1).lockRoundWithUpdate(marketId, 2, reports(6425000000000n, r2Info.lockTimestamp))).wait();
 
   // Settle 190s late: the old contract cancelled here; now the pinned close price decides the round.
   // The feed did not move between the two pinned observations, so it is a genuine tie.
   await increaseTime(250);
-  await (await amm.connect(keeper2).settleRoundWithUpdate(
-    marketId, 2, [pythUpdate(btcFeedId, 6425000000000n, r2Info.closeTimestamp)], { value: 1n }
-  )).wait();
+  await (await amm.connect(keeper2).settleRoundWithUpdate(marketId, 2, reports(6425000000000n, r2Info.closeTimestamp))).wait();
 
   const r2After = await amm.rounds(marketId, 2);
   assert(Number(r2After.status) === 4, 'Round #2 cancelled on genuine price tie (status = 4)');
@@ -302,27 +288,43 @@ async function runEvmTests() {
 
   assert(user1RefundBalAfter - user1RefundBalBefore + refundGas1 === ethers.parseEther('5'), 'User 1 received 100% refund on cancelled round');
 
-  // Test 9: Excess Pyth Update Fee Auto-Refund (VULN-05 Fix)
-  console.log('\n--- Step 10: Excess Pyth Update Fee Auto-Refund (VULN-05 Fix) ---');
-  // Round #3 is now active
+  // Test 9: Signed oracle reports
+  console.log('\n--- Step 10: Signed Oracle Reports ---');
   const r3 = await amm.rounds(marketId, 3);
   await (await amm.connect(user1).betUp(marketId, 3, { value: ethers.parseEther('1') })).wait();
   await (await amm.connect(user2).betDown(marketId, 3, { value: ethers.parseEther('1') })).wait();
-
   const blkNow = await getLatestBlock();
   await increaseTime(Number(r3.lockTimestamp) - blkNow.timestamp + 5);
 
-  // Keeper sends 0.1 MON while the Pyth fee is 1 wei: everything but the fee must come back
-  const keeperBalBeforeUpdate = await getBalance(keeper1);
-  const updateTx = await amm.connect(keeper1).lockRoundWithUpdate(
-    marketId, 3, [pythUpdate(btcFeedId, 6425000000000n, r3.lockTimestamp)], { value: ethers.parseEther('0.1') }
-  );
-  const updateRcpt = await updateTx.wait();
-  const updateGas = updateRcpt.fee;
-  const keeperBalAfterUpdate = await getBalance(keeper1);
+  const lockFails = async (reps, reason) => {
+    try {
+      await amm.connect(keeper1).lockRoundWithUpdate.staticCall(marketId, 3, reps);
+      return false;
+    } catch (err) {
+      return `${err.reason || ''} ${err.shortMessage || ''} ${err.message || ''}`.includes(reason);
+    }
+  };
+  const pinMs = pinned(r3.lockTimestamp) * 1000n;
+  assert(await lockFails(signerKeys.map((k) => signReport(k, 'BTC', 6425000000000n, pinMs + 10000n)), 'Report not at pinned timestamp'),
+    'Reports for a later 10s mark are rejected (no choice of timestamp)');
+  assert(await lockFails(reports(6425000000000n, r3.lockTimestamp, signerKeys.slice(0, 4)), 'Not enough oracle signatures'),
+    '4 of 5 signatures rejected: every signer must sign (no choice of signer subset)');
+  const dup = reports(6425000000000n, r3.lockTimestamp);
+  dup[4] = dup[0];
+  assert(await lockFails(dup, 'Duplicate oracle signer'), 'The same signer twice is rejected');
+  const rogue = new ethers.SigningKey(ethers.id('rogue'));
+  assert(await lockFails([...reports(6425000000000n, r3.lockTimestamp).slice(0, 4), signReport(rogue, 'BTC', 6425000000000n, pinMs)], 'Signer not authorised'),
+    'A report from an unknown key is rejected');
+  const forged = reports(6425000000000n, r3.lockTimestamp);
+  forged[2] = { ...forged[2], value: 9999900000000n };
+  assert(await lockFails(forged, 'Signer not authorised'), 'A report whose value was altered after signing is rejected');
+  const wrongFeed = signerKeys.map((k) => signReport(k, 'ETH', 6425000000000n, pinMs));
+  assert(await lockFails(wrongFeed, 'Signer not authorised'), 'Reports signed for another feed are rejected');
 
-  const balanceDiff = keeperBalBeforeUpdate - keeperBalAfterUpdate - updateGas;
-  assert(balanceDiff === 1n, 'Excess 0.1 MON refunded to caller; only the 1 wei Pyth fee was spent');
+  // Median of five slightly different node values
+  const values = [6425000000000n, 6425100000000n, 6424900000000n, 6425300000000n, 6424000000000n];
+  await (await amm.connect(keeper1).lockRoundWithUpdate(marketId, 3, signerKeys.map((k, i) => signReport(k, 'BTC', values[i], pinMs)))).wait();
+  assert((await amm.rounds(marketId, 3)).lockPrice === 6425000000000n * 10n ** 28n, 'Lock price is the median of the signed values');
 
   // Test 10: Creator Royalty Claims
   console.log('\n--- Step 11: Creator Fee Royalties Claim ---');
@@ -335,11 +337,40 @@ async function runEvmTests() {
   // Round 1 volume was 22 MON, creator fee = 0.1% = 0.022 MON
   assert(creatorBalAfter - creatorBalBefore + creatorGas === ethers.parseEther('0.022'), 'Creator successfully claimed 0.1% royalties (0.022 MON)');
 
+  await ganacheProvider.disconnect();
+  await realRedStonePackages();
+
   console.log('\n================================================================================');
   console.log(`REAL EVM TEST VERDICT: ${passedTests}/${totalTests} TESTS PASSED SECURELY ON-CHAIN`);
   console.log('================================================================================\n');
+}
 
-  await ganacheProvider.disconnect();
+// Test 11: packages captured from RedStone's free gateway verify against the production signer set
+async function realRedStonePackages() {
+  console.log('\n--- Step 12: Real RedStone Packages On-Chain ---');
+  const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'redstone_primary_prod_packages.json'), 'utf8'));
+  const parsed = fixture.BTC.map(parsePackage);
+  const pkgTs = Number(parsed[0].report.timestampMs / 1000n);
+  // Chain clock set so the round's lock report is exactly the captured one
+  const gp = ganache.provider({ logging: { quiet: true }, wallet: { totalAccounts: 4, defaultBalance: 1000 }, chain: { time: new Date((pkgTs - 65) * 1000) } });
+  const provider = new ethers.BrowserProvider(gp);
+  const [owner, a, b, keeper] = await provider.listAccounts();
+  const load = (n) => [JSON.parse(fs.readFileSync(path.join(buildDir, `${n}.abi`), 'utf8')), `0x${fs.readFileSync(path.join(buildDir, `${n}.bin`), 'utf8').trim().replace(/^0x/, '')}`];
+  const [abi, bin] = load('MonadUpDownAMM_sol_MonadUpDownAMM');
+  const amm = await (await new ethers.ContractFactory(abi, bin, owner).deploy(REDSTONE_PRIMARY_SIGNERS, 5)).waitForDeployment();
+  await (await amm.createMarket(feedIdBytes32('BTC'), 'Bitcoin', 'BTC/USD', 60)).wait();
+  const marketId = ethers.solidityPackedKeccak256(['bytes32', 'string', 'uint256'], [feedIdBytes32('BTC'), 'BTC/USD', 60]);
+  await (await amm.connect(a).betUp(marketId, 1, { value: ethers.parseEther('1') })).wait();
+  await (await amm.connect(b).betDown(marketId, 1, { value: ethers.parseEther('1') })).wait();
+  const lockReportTs = await amm.lockReportTimestamp(marketId, 1);
+  assert(Number(lockReportTs) === pkgTs, `Round's lock report timestamp matches the captured package (${pkgTs})`);
+  await provider.send('evm_increaseTime', [70]);
+  await provider.send('evm_mine', []);
+  await (await amm.connect(keeper).lockRoundWithUpdate(marketId, 1, parsed.map((p) => p.report))).wait();
+  const r = await amm.rounds(marketId, 1);
+  const expected = medianUnits(parsed.map((p) => p.report.value)) * 10n ** 28n;
+  assert(Number(r.status) === 2 && r.lockPrice === expected, `Real RedStone BTC reports (5 signers) locked the round at $${Number(expected / 10n ** 30n) / 1e6}`);
+  await gp.disconnect();
 }
 
 runEvmTests().catch((err) => {
