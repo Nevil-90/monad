@@ -80,6 +80,13 @@ button:disabled { cursor: not-allowed; }
   inset: 0;
   pointer-events: none;
 }
+/* Short windows (e.g. DevTools docked at the bottom): keep a usable layout height and let the page
+   scroll, instead of the console covering the price and leaving no room for the chart */
+@media (max-height: 779px) {
+  html, body { overflow-x: hidden; overflow-y: auto; height: auto; }
+  body { min-height: 780px; }
+  #horizon, .ui { position: absolute; top: 0; left: 0; right: 0; bottom: auto; height: 780px; }
+}
 .ui > * { pointer-events: auto; }
 
 /* --------------------------------------------------------------------------

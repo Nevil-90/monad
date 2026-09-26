@@ -239,6 +239,8 @@ export function startApp() {
   // Contract parameters, read once without a wallet: fee and minimum bet (null until read)
   let protocolFeeBps = null;
   let minBetMon = null;
+  let stakeEdited = false;
+  el.stake.addEventListener('input', (e) => { if (e.isTrusted) stakeEdited = true; });
   async function loadProtocolParameters() {
     const p = await web3.fetchLiveProtocolFees();
     if (p?.totalFeeBps !== undefined) {
@@ -246,7 +248,15 @@ export function startApp() {
       $('guide-fee').textContent = `${(protocolFeeBps / 100).toFixed(1)}%`;
       bootStep('network');
     }
-    if (p?.minBetWei !== undefined) minBetMon = Number(ethers.formatEther(p.minBetWei));
+    if (p?.minBetWei !== undefined) {
+      minBetMon = Number(ethers.formatEther(p.minBetWei));
+      // Start at the contract's minimum (rounded up to 0.1 MON) unless the user already typed a stake
+      if (!stakeEdited) {
+        el.stake.value = String(Math.ceil(minBetMon * 10) / 10);
+        el.stake.dispatchEvent(new Event('input'));
+        stakeEdited = false;
+      }
+    }
     if (p?.lockBufferSeconds !== undefined && p?.priceWindowSeconds !== undefined) {
       roundRules = { lockBuffer: p.lockBufferSeconds, priceWindow: p.priceWindowSeconds };
     }
@@ -368,19 +378,24 @@ export function startApp() {
   const engine = new HorizonEngine(el.canvas);
 
   function updateSafeArea() {
-    const H = window.innerHeight;
+    // Positions relative to the layout (the chart canvas), not the window: on short windows the
+    // layout is taller than the window and the page scrolls
+    const layout = $('horizon').getBoundingClientRect();
+    const H = layout.height;
     const W = window.innerWidth;
-    document.documentElement.style.setProperty('--topbar-h', `${Math.round(document.querySelector('.topbar').getBoundingClientRect().bottom)}px`);
-    const consoleRect = el.console.getBoundingClientRect();
-    document.documentElement.style.setProperty('--console-h', `${Math.round(H - consoleRect.top)}px`);
+    const y = (r) => r - layout.top;
+    document.documentElement.style.setProperty('--topbar-h', `${Math.round(y(document.querySelector('.topbar').getBoundingClientRect().bottom))}px`);
+    const consoleTop = y(el.console.getBoundingClientRect().top);
+    document.documentElement.style.setProperty('--console-h', `${Math.round(H - consoleTop)}px`);
 
-    const chip = el.positionChip.classList.contains('hidden') ? null : el.positionChip.getBoundingClientRect();
+    const chipRect = el.positionChip.classList.contains('hidden') ? null : el.positionChip.getBoundingClientRect();
+    const chip = chipRect ? { top: y(chipRect.top), bottom: y(chipRect.bottom) } : null;
     const chipOnTop = chip && chip.top < H / 2;
-    const readoutBottom = el.readout.getBoundingClientRect().bottom;
+    const readoutBottom = y(el.readout.getBoundingClientRect().bottom);
     const top = Math.max(readoutBottom, chipOnTop ? chip.bottom : 0) + 36;
     const ticker = $('pulse-ticker');
-    const tickerTop = ticker.classList.contains('hidden') ? Infinity : ticker.getBoundingClientRect().top;
-    const bottom = Math.min(consoleRect.top, chip && !chipOnTop ? chip.top : Infinity, tickerTop) - 30;
+    const tickerTop = ticker.classList.contains('hidden') ? Infinity : y(ticker.getBoundingClientRect().top);
+    const bottom = Math.min(consoleTop, chip && !chipOnTop ? chip.top : Infinity, tickerTop) - 30;
     engine.setSafeArea(top / H, bottom / H);
 
     const pulseRect = $('pulse').getBoundingClientRect();
