@@ -7,7 +7,7 @@
     "dev": "node scripts/dev.js",
     "build": "next build",
     "compile": "node scripts/compile.js",
-    "test": "node test/amm_invariants.test.js",
+    "test": "node test/app_logic.test.js",
     "test:evm": "node test/contract_evm.test.js",
     "test:security": "node test/security_regressions.test.js",
     "test:mutation": "node scripts/mutation_check.js",
@@ -18,7 +18,8 @@
     "test:all": "npm run compile && npm test && npm run test:evm && npm run test:security",
     "start": "next start -p 3000",
     "dev:app": "next dev -p 3000",
-    "dev:testnet": "node scripts/dev.js --with-keeper"
+    "dev:testnet": "node scripts/dev.js --with-keeper",
+    "test:wallets": "node --env-file-if-exists=.env scripts/multi_wallet_test.js"
   },
   "devDependencies": {
     "ganache": "^7.9.2",

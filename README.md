@@ -31,7 +31,8 @@ Rounds settle on signed price reports from [RedStone](https://redstone.finance)'
 with no API key. The contract verifies them itself (`contracts/SignedPriceOracle.sol`, our own MIT
 implementation):
 
-- A report is accepted only if **all 5** of RedStone's primary-prod nodes signed it.
+- A report is accepted only if at least **4 of the 5** RedStone primary-prod nodes signed it (one node
+  skipping a report cannot block a round).
 - The lock and close prices are **pinned** to one report timestamp per round (the first 10-second mark
   at or after lock/close time), so whoever submits it has no choice of price.
 - The price is the median of the nodes' values, and the chart in the app shows exactly those values.
@@ -52,7 +53,7 @@ Details and residual risks: [SECURITY_FIXES.md](SECURITY_FIXES.md) (SEC-01, 02, 
 ## Live on Monad testnet
 
 `MonadUpDownAMM` is deployed at
-[`0x69390eAE89d12DA0742Eb7057bef2356C413cD6b`](https://testnet.monadexplorer.com/address/0x69390eAE89d12DA0742Eb7057bef2356C413cD6b)
+[`0xF4Cc741A76126cEe191D25d0ccd37c859925e03E`](https://testnet.monadexplorer.com/address/0xF4Cc741A76126cEe191D25d0ccd37c859925e03E)
 with BTC, ETH, SOL and MON markets. Tested end to end in a browser with a real wallet: bets, lock and
 settle on live RedStone reports, winner claims, and self-service refunds of one-sided rounds. An earlier
 deployment's settled round, for reference:
@@ -66,30 +67,39 @@ warns when fees are a large share of a small stake, and claims many rounds in on
 Idle and one-sided markets cost nothing: such a round is replaced by the next bet, its bettors claim
 their stake back directly, and the keeper only sends transactions for contested rounds.
 
-## Run it locally
+## Run it
 
 Requires Node 22.9+ (for `--env-file-if-exists`).
 
 ```bash
 npm install
 npm run compile                 # contracts -> build/ and src/contracts/AMMAbi.js
-cp .env.example .env
+cp .env.example .env            # then fill it in (see "Deploy to Monad testnet")
 
-npm run dev                     # price relay (:8787) + app on http://localhost:3000, Ctrl+C stops both
+npm run dev:testnet             # price relay + keeper + app on http://localhost:3000; Ctrl+C stops all
 ```
 
-Live mode against a local chain with simulated players:
+There is one mode: every bet is a real transaction on the network in `.env` (Monad testnet today).
+Without a wallet you can watch rounds, prices and the Dashboard; connect a wallet with testnet MON to bet.
 
-```bash
-npm run dev:chain               # prints the NEXT_PUBLIC_* values to put in .env
-npm run dev
-```
+For development without testnet MON, `npm run dev:chain` starts a local chain with the contract and
+simulated players and prints the `NEXT_PUBLIC_*` values to use instead.
+
+### Advanced settings (optional, not in `.env.example`)
+
+| Variable | Default | Use |
+|---|---|---|
+| `NEXT_PUBLIC_RPC_URL` | `https://testnet-rpc.monad.xyz` | Another Monad RPC (e.g. the local chain) |
+| `NEXT_PUBLIC_CHAIN_ID` | `10143` | Chain id matching that RPC |
+| `NEXT_PUBLIC_EXPLORER_URL` | `https://testnet.monadexplorer.com` | Explorer used for transaction links |
+| `NEXT_PUBLIC_MAINNET_CONTRACT_ADDRESS`, `NEXT_PUBLIC_MAINNET_DEPLOY_BLOCK` | none | Mainnet deployment |
+| `PORT`, `ALLOWED_ORIGIN` | `8787`, `*` | Price relay port and the site allowed to read it (set your domain in production) |
 
 ## Deploy to Monad testnet
 
 ```bash
 # .env: DEPLOYER_PRIVATE_KEY and KEEPER_PRIVATE_KEY (fund both from the Monad faucet)
-npm run deploy -- --dry-run     # pre-flight: RPC, chain id, all 5 RedStone signers live, gas estimate
+npm run deploy -- --dry-run     # pre-flight: RPC, chain id, RedStone signers live, gas estimate
 npm run deploy -- --network testnet
 # put the printed NEXT_PUBLIC_CONTRACT_ADDRESS and NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK in .env
 npm run dev:testnet   # relay + keeper + app in one terminal (development)

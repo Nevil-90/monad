@@ -8,7 +8,7 @@
  * 
  * Flow:
  * 1. Validates RPC connectivity and gas parameters.
- * 2. Deploys MonadUpDownAMM with RedStone's primary-prod signer set (all 5 signatures required).
+ * 2. Deploys MonadUpDownAMM with RedStone's primary-prod signer set (4 of 5 signatures required).
  * 3. Initializes canonical markets (BTC, ETH, SOL, MON) and marks them verified.
  * 4. Outputs verified contract addresses and deployment receipt.
  */
@@ -44,7 +44,10 @@ async function deploy() {
   const config = ENVIRONMENTS[targetNet];
   if (!config) throw new Error(`Unknown --network "${targetNet}". Use one of: ${Object.keys(ENVIRONMENTS).join(', ')}.`);
   const signers = REDSTONE_PRIMARY_SIGNERS;
-  const threshold = signers.length;
+  // 4 of 5 (SEC-27): all 5 left rounds unsettleable whenever one node skipped a report (seen on
+  // testnet); 4 tolerates one missing node, and the keeper's choice of which 4 moves the median only
+  // within the spread between the nodes' values.
+  const threshold = 4;
 
   console.log(`[1] Selected Target Environment: ${config.name}`);
   console.log(`    Chain ID: ${config.chainId} (${config.chainIdHex})`);
@@ -88,9 +91,9 @@ async function deploy() {
     const feeds = Object.values(SUPPORTED_MARKETS).map((m) => m.feed);
     const latest = await fetchLatestReports(feeds, { signers });
     for (const feed of feeds) {
-      if (latest[feed].length < threshold) throw new Error(`RedStone: only ${latest[feed].length} of ${threshold} signed ${feed} reports right now.`);
+      if (latest[feed].length < threshold) throw new Error(`RedStone: only ${latest[feed].length} of ${signers.length} signed ${feed} reports right now (need ${threshold}).`);
     }
-    console.log(`    [OK] RedStone gateway: all ${threshold} signers currently sign ${feeds.join(', ')}`);
+    console.log(`    [OK] RedStone gateway: at least ${threshold} of ${signers.length} signers currently sign ${feeds.join(', ')}`);
     const factory = new ethers.ContractFactory(abi, bytecode);
     const deployTx = await factory.getDeployTransaction(signers, threshold);
     const gas = await provider.estimateGas(deployTx);

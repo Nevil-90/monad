@@ -3,12 +3,14 @@
  * JSON-RPC provider for Monad's public endpoints, which allow 15 requests per second and answer the
  * excess with HTTP 429 / code -32011 ("requests limited to 15/sec"). ethers reports that on eth_call
  * as a misleading "missing revert data". This provider recognises exactly that response and retries
- * the same request after a short, growing pause. Any other error is thrown immediately.
+ * the same request after a short, growing pause. Any other error is thrown immediately. It also
+ * paces its own requests (at most MAX_PER_SECOND) so a page or script does not trip the limit.
  */
 
 import { ethers } from 'ethers';
 
 const MAX_RETRIES = 6;
+const MAX_PER_SECOND = 6;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function isRateLimited(err) {
@@ -22,8 +24,23 @@ export class MonadRpcProvider extends ethers.JsonRpcProvider {
     super(url, chainId, { staticNetwork: true, batchMaxCount: 1 });
   }
 
+  /** Waits until sending one more request keeps this client under MAX_PER_SECOND */
+  async pace() {
+    this.sent ||= [];
+    for (;;) {
+      const now = Date.now();
+      while (this.sent.length && now - this.sent[0] >= 1000) this.sent.shift();
+      if (this.sent.length < MAX_PER_SECOND) {
+        this.sent.push(now);
+        return;
+      }
+      await sleep(1000 - (now - this.sent[0]) + 5);
+    }
+  }
+
   async send(method, params) {
     for (let attempt = 0; ; attempt++) {
+      await this.pace();
       try {
         return await super.send(method, params);
       } catch (err) {

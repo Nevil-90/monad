@@ -1,8 +1,7 @@
 /**
  * LiveRounds.js
- * Live mode's view of the contract: the active market's current round, read from Monad every 2 seconds,
- * and the connected wallet's positions, built from the contract's events. Nothing here is simulated;
- * Demo mode keeps using AMMState's in-browser rounds.
+ * The app's view of the contract: the active market's current round, read from Monad every 2 seconds,
+ * and the connected wallet's positions, built from the contract's events. Nothing here is simulated.
  *
  * Round phases, all from the contract's own timestamps:
  *   open      bets accepted until betCloseTimestamp

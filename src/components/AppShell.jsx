@@ -9,6 +9,32 @@ export default function AppShell() {
     <>
         <canvas id="horizon" aria-hidden="true"></canvas>
 
+        {/* Boot screen: the logo (a sun over a horizon) comes alive until the network, live prices
+            and the current round are ready. Pure CSS, so it shows before any JavaScript runs. */}
+        <div className="boot" id="boot" role="status" aria-live="polite">
+          <div className="boot-sky" aria-hidden="true"></div>
+          <div className="boot-sea" aria-hidden="true"></div>
+          <div className="boot-line" aria-hidden="true"><span className="boot-sweep"></span></div>
+          <div className="boot-sparks" aria-hidden="true">
+            {Array.from({ length: 14 }, (_, i) => <i key={i} className={i % 2 ? 'down' : 'up'} style={{ '--i': i }} />)}
+          </div>
+          <div className="boot-orb-wrap" aria-hidden="true">
+            <span className="boot-ring"></span>
+            <span className="boot-ring r2"></span>
+            <span className="boot-orb"></span>
+            <span className="boot-reflect"></span>
+          </div>
+          <div className="boot-stage">
+            <div className="boot-brand">MonadPulse</div>
+            <div className="boot-tag">Rise or fall · every minute · on Monad</div>
+            <ul className="boot-steps">
+              <li data-boot="network"><span className="boot-check" aria-hidden="true"></span>Connecting to Monad</li>
+              <li data-boot="prices"><span className="boot-check" aria-hidden="true"></span>Streaming live prices</li>
+              <li data-boot="round"><span className="boot-check" aria-hidden="true"></span>Reading the current round</li>
+            </ul>
+          </div>
+        </div>
+
         <div className="ui">
           {/* Top bar */}
           <header className="topbar">
@@ -46,11 +72,7 @@ export default function AppShell() {
                 <span className="balance-val num" id="balance-val">—</span>
                 <span className="balance-unit">MON</span>
               </div>
-              <div className="mode" role="group" aria-label="Mode">
-                <button className="mode-btn active" id="mode-demo" aria-pressed="true" title="Practice with demo MON. No real funds.">Demo</button>
-                <button className="mode-btn" id="mode-live" aria-pressed="false" title="Use your wallet on Monad">Live</button>
-              </div>
-              <button className="ghost-btn" id="faucet-btn" title="Add 500 demo MON">+500</button>
+              <span className="network-badge" id="network-badge" title="Bets are real transactions on this network">—</span>
               <button className="wallet-btn" id="wallet-btn">
                 <span className="wallet-dot" id="wallet-dot"></span>
                 <span id="wallet-label">Connect</span>
@@ -97,17 +119,17 @@ export default function AppShell() {
           <section className="pulse" id="pulse" aria-label="Pulse: payouts to winners">
             <header className="pulse-head">
               <span className="pulse-title"><span className="pulse-beat" aria-hidden="true"></span>Pulse</span>
-              <span className="pulse-badge" id="pulse-badge">Demo</span>
+              <span className="pulse-badge live" id="pulse-badge">On-chain</span>
             </header>
-            <div className="pulse-big num" id="pulse-paid">0</div>
+            <div className="pulse-big num" id="pulse-paid">—</div>
             <div className="pulse-big-label">MON paid to winners</div>
             <div className="pulse-stats">
               <div><span className="pulse-stat num" id="pulse-now">—</span><span className="pulse-stat-label">playing now</span></div>
-              <div><span className="pulse-stat num" id="pulse-rounds">0</span><span className="pulse-stat-label">rounds</span></div>
+              <div><span className="pulse-stat num" id="pulse-rounds">—</span><span className="pulse-stat-label">rounds settled</span></div>
               <div><span className="pulse-stat num" id="pulse-top">—</span><span className="pulse-stat-label">top payout</span></div>
             </div>
             <ul className="pulse-feed" id="pulse-feed"></ul>
-            <p className="pulse-note" id="pulse-note">Demo rounds since you opened this page, with simulated players.</p>
+            <p className="pulse-note" id="pulse-note">All-time totals read from the contract. The feed shows wins claimed on-chain.</p>
           </section>
 
           {/* Mobile: rotating latest win */}
@@ -206,7 +228,6 @@ export default function AppShell() {
               <div>
                 <h1 className="dash-title">Every MON, on the record</h1>
                 <p className="dash-sub">Every row is an event emitted by the contract on Monad, indexed by the MonadPulse relay. Each one links to its transaction on the Monad explorer, so anyone can check it, and the totals are read from the contract itself.</p>
-                <p className="dash-demo-note" id="dash-demo-note">You're in <b>Demo</b>: practice bets stay in your browser and never appear here. This page shows real transactions on Monad testnet. <button className="link-btn" id="dash-go-live">Switch to Live</button> to bet with your wallet.</p>
               </div>
               <div className="dash-source">
                 <div className="dash-sync"><span className="sync-dot" id="dash-sync-dot"></span><span id="dash-sync">Connecting…</span></div>
@@ -217,11 +238,11 @@ export default function AppShell() {
             <section className="dash-stats">
               <div className="dash-stat"><span className="dash-stat-label">Paid to winners</span><span className="dash-stat-val num" id="ds-paid">—</span><span className="dash-stat-note">All time · contract counter</span></div>
               <div className="dash-stat"><span className="dash-stat-label">Settled volume</span><span className="dash-stat-val num" id="ds-volume">—</span><span className="dash-stat-note">All time · contract counter</span></div>
-              <div className="dash-stat"><span className="dash-stat-label">Wallets</span><span className="dash-stat-val num" id="ds-wallets">—</span><span className="dash-stat-note">In loaded history</span></div>
-              <div className="dash-stat"><span className="dash-stat-label">Bets placed</span><span className="dash-stat-val num" id="ds-bets">—</span><span className="dash-stat-note">In loaded history</span></div>
+              <div className="dash-stat"><span className="dash-stat-label">Players</span><span className="dash-stat-val num" id="ds-wallets">—</span><span className="dash-stat-note">All time · wallets that placed a bet</span></div>
+              <div className="dash-stat"><span className="dash-stat-label">Bets placed</span><span className="dash-stat-val num" id="ds-bets">—</span><span className="dash-stat-note">All time · since deployment</span></div>
             </section>
 
-            <section className="dash-flow" aria-label="Money flow in loaded history">
+            <section className="dash-flow" aria-label="Money flow since deployment">
               <div className="flow-row">
                 <span className="flow-label">Put in</span>
                 <div className="flow-bar" id="flow-in"></div>
@@ -300,12 +321,11 @@ export default function AppShell() {
                 <div><dt>Pool</dt><dd className="num" id="stat-pool">—</dd></div>
                 <div><dt>Rise / Fall</dt><dd className="num" id="stat-split">—</dd></div>
                 <div><dt>Your stake impact</dt><dd className="num" id="stat-impact">—</dd></div>
-                <div><dt>Protocol fee</dt><dd className="num" id="stat-fee">1.50%</dd></div>
+                <div><dt>Protocol fee</dt><dd className="num" id="stat-fee">—</dd></div>
               </dl>
-              <p className="stat-note demo-note" id="demo-note">Demo rounds include simulated bets from other players so every round has two sides.</p>
             </div>
             <div className="stat-group">
-              <h3 className="stat-title">Your session</h3>
+              <h3 className="stat-title">Your record</h3>
               <dl className="stat-grid">
                 <div><dt>Settled bets</dt><dd className="num" id="stat-settled">0</dd></div>
                 <div><dt>Win rate</dt><dd className="num" id="stat-winrate">—</dd></div>
@@ -338,7 +358,7 @@ export default function AppShell() {
               </li>
               <li>
                 <span className="guide-n num">2</span>
-                <div><h3>The strike locks</h3><p>When betting closes, the price is locked as the strike: the bright line across the chart. From here, watch it move.</p></div>
+                <div><h3>The strike locks</h3><p>Just after betting closes, the official price is locked as the strike: the bright line across the chart. From here, watch it move.</p></div>
               </li>
               <li>
                 <span className="guide-n num">3</span>
@@ -349,7 +369,7 @@ export default function AppShell() {
                 <div><h3>No contest, stake back</h3><p>If nobody took the other side, or the price closes exactly at the strike, your stake is refunded in full. Network fees for placing and claiming a bet are paid to Monad and are not refundable.</p></div>
               </li>
             </ol>
-            <p className="guide-note">Prices come from RedStone, the same signed oracle reports the contract settles on. Every bet and payout is public in the Dashboard. Demo uses practice MON and simulated players; Live uses your wallet on Monad.</p>
+            <p className="guide-note">The chart streams live Coinbase trades. Rounds are decided by the official price: RedStone's signed reports, verified by the contract, shown next to the strike. Every bet and payout is a transaction on Monad, public in the Dashboard. Connect a wallet with MON to play.</p>
             <div className="modal-actions"><button className="solid-btn" data-close="guide-modal">Start trading</button></div>
           </div>
         </div>

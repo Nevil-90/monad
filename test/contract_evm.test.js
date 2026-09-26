@@ -360,9 +360,15 @@ async function realRedStonePackages() {
   const amm = await (await new ethers.ContractFactory(abi, bin, owner).deploy(REDSTONE_PRIMARY_SIGNERS, 5)).waitForDeployment();
   await (await amm.createMarket(feedIdBytes32('BTC'), 'Bitcoin', 'BTC/USD', 60)).wait();
   const marketId = ethers.solidityPackedKeccak256(['bytes32', 'string', 'uint256'], [feedIdBytes32('BTC'), 'BTC/USD', 60]);
+  // A second contract with the production threshold (SEC-27: 4 of 5), opened in the same minute so
+  // its lock report is the same captured timestamp
+  const amm4 = await (await new ethers.ContractFactory(abi, bin, owner).deploy(REDSTONE_PRIMARY_SIGNERS, 4)).waitForDeployment();
+  await (await amm4.createMarket(feedIdBytes32('BTC'), 'Bitcoin', 'BTC/USD', 60)).wait();
   await (await amm.connect(a).betUp(marketId, 1, { value: ethers.parseEther('1') })).wait();
   await (await amm.connect(b).betDown(marketId, 1, { value: ethers.parseEther('1') })).wait();
   const lockReportTs = await amm.lockReportTimestamp(marketId, 1);
+  await (await amm4.connect(a).betUp(marketId, 1, { value: ethers.parseEther('1') })).wait();
+  await (await amm4.connect(b).betDown(marketId, 1, { value: ethers.parseEther('1') })).wait();
   assert(Number(lockReportTs) === pkgTs, `Round's lock report timestamp matches the captured package (${pkgTs})`);
   await provider.send('evm_increaseTime', [70]);
   await provider.send('evm_mine', []);
@@ -370,6 +376,21 @@ async function realRedStonePackages() {
   const r = await amm.rounds(marketId, 1);
   const expected = medianUnits(parsed.map((p) => p.report.value)) * 10n ** 28n;
   assert(Number(r.status) === 2 && r.lockPrice === expected, `Real RedStone BTC reports (5 signers) locked the round at $${Number(expected / 10n ** 30n) / 1e6}`);
+
+  assert(Number(await amm4.lockReportTimestamp(marketId, 1)) === pkgTs, 'Threshold-4 contract locks on the same captured report timestamp');
+  let threeRejected = false;
+  try {
+    await amm4.connect(keeper).lockRoundWithUpdate.staticCall(marketId, 1, parsed.slice(0, 3).map((p) => p.report));
+  } catch (err) {
+    threeRejected = `${err.reason || ''} ${err.shortMessage || ''} ${err.message || ''}`.includes('Not enough oracle signatures');
+  }
+  assert(threeRejected, '4-of-5 contract: 3 real signatures are rejected (Not enough oracle signatures)');
+  const four = parsed.slice(1, 5);
+  await (await amm4.connect(keeper).lockRoundWithUpdate(marketId, 1, four.map((p) => p.report))).wait();
+  const r4 = await amm4.rounds(marketId, 1);
+  assert(Number(r4.status) === 2 && r4.lockPrice === medianUnits(four.map((p) => p.report.value)) * 10n ** 28n,
+    '4-of-5 contract: one node missing, the other 4 real signatures lock the round at their median');
+
   await gp.disconnect();
 }
 

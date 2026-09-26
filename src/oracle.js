@@ -14,8 +14,8 @@ import { ethers } from 'ethers';
 export const REDSTONE_GATEWAY = 'https://oracle-gateway-1.a.redstone.finance';
 export const REDSTONE_DATA_SERVICE = 'redstone-primary-prod';
 
-// Authorised nodes of redstone-primary-prod. Checked on 2026-09-26: all five sign every BTC, ETH,
-// SOL and MON report. The contract requires all five by default (see SECURITY_FIXES.md SEC-22).
+// Authorised nodes of redstone-primary-prod (checked 2026-09-26). The deployed contract requires 4 of
+// these 5 signatures per report (SECURITY_FIXES.md SEC-22, SEC-27).
 export const REDSTONE_PRIMARY_SIGNERS = [
   '0x8BB8F32Df04c8b654987DAaeD53D6B6091e3B774',
   '0xdEB22f54738d54976C4c0fe5ce6d408E40d88499',

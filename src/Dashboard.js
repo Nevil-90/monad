@@ -189,8 +189,10 @@ export class Dashboard {
     const s = h.summary();
     this.el('ds-paid').textContent = h.totals.paidToWinners === null ? '—' : `${fmtMon(h.totals.paidToWinners)} MON`;
     this.el('ds-volume').textContent = h.totals.settledVolume === null ? '—' : `${fmtMon(h.totals.settledVolume)} MON`;
-    this.el('ds-wallets').textContent = fmtInt(s.walletCount);
-    this.el('ds-bets').textContent = fmtInt(s.betsCount);
+    // Counts are all-time once the full history is loaded; until then they would undercount
+    const complete = h.status === 'live';
+    this.el('ds-wallets').textContent = complete ? fmtInt(s.walletCount) : '—';
+    this.el('ds-bets').textContent = complete ? fmtInt(s.betsCount) : '—';
 
     // Money flow: what came in, what left, and what is still in the contract
     const inTotal = s.riseIn + s.fallIn;
@@ -224,7 +226,7 @@ export class Dashboard {
     const h = this.history;
     if (h.status === 'syncing' || h.status === 'idle') return 'Reading contract events…';
     if (h.status === 'error') return escapeHtml(h.error || 'Could not reach the network.');
-    if (this.query) return 'Nothing matches that search in the loaded history.';
+    if (this.query) return 'Nothing matches that search.';
     return h.hasOlder() ? 'No activity in these blocks yet. Load older history to look further back.' : 'No activity on this contract yet.';
   }
 

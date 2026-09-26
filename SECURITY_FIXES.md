@@ -51,6 +51,8 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-24 | Medium (ops) | Idle markets needed a keeper transaction every minute (~6 MON/hour for 4 markets) | ✅ Fixed | `[SEC-24]` | ✅ |
 | SEC-25 | Medium (cost) | Monad charges the full gas LIMIT: +20%/+30% margins and a 10-slot Round struct overcharged every user and the keeper | ✅ Fixed | `[SEC-25]` (gas budgets) | — |
 | SEC-26 | Medium | "100% refund" ignored network fees, and refunds depended on someone else's transaction | ✅ Fixed | `[SEC-26]` | ✅ |
+| SEC-27 | Medium (liveness) | Requiring all 5 oracle signatures left contested rounds unsettleable when one node skipped a report | ✅ Fixed | EVM `4-of-5` checks | via SEC-02 |
+| SEC-28 | High (liveness) | Free gateway serves only the latest report through a rate-limited CDN: ~12% of 10 s timestamps are never observable, so their rounds can only be refunded | ⬜ Open | multi-wallet test | — |
 | SEC-23 | High (legal) | RedStone's own contract library is BUSL-1.1; free production use of its data is unconfirmed | 🟡 Partial | — | — |
 
 ---
@@ -161,7 +163,7 @@ Failures used to be hidden behind substitute values. Each one now fails visibly 
 
 ### SEC-22: Owner-controlled oracle signers (High) ✅
 **Issue.** Our own verifier (`SignedPriceOracle.sol`) checks signatures against a signer list stored in the contract. An owner able to replace that list instantly could add their own key and settle any round at a forged price.
-**Fix.** Signers change only through `proposeOracleSigners` → a public `OracleSignersProposed` event → `applyOracleSigners` after `ORACLE_CHANGE_DELAY` (2 days), cancellable. The threshold must be a strict majority. Users have two days to stop betting before any change applies. Default set: RedStone's 5 primary-prod nodes, all 5 required (no signer-subset choice, see SEC-02).
+**Fix.** Signers change only through `proposeOracleSigners` → a public `OracleSignersProposed` event → `applyOracleSigners` after `ORACLE_CHANGE_DELAY` (2 days), cancellable. The threshold must be a strict majority. Users have two days to stop betting before any change applies. Default set: RedStone's 5 primary-prod nodes, 4 required (SEC-27).
 **Test.** `[SEC-22]`: non-owner can't propose; a minority threshold is rejected; an immediate apply reverts; reports from the proposed key are rejected while pending; a cancelled proposal can't be applied; a legitimate rotation applies after 2 days.
 **Before mainnet.**
 - [ ] Put the owner behind a multisig as well (SEC-16).
@@ -180,9 +182,24 @@ Failures used to be hidden behind substitute values. Each one now fails visibly 
 **Test.** `[SEC-26]`: no refund while the other side can still bet; full stake refunded directly after betting closes; no double refund, including after the round is later cancelled; contested rounds refundable directly only after the timeout.
 **Residual.** Fees are real money on small stakes. With ~0.02 MON to bet and claim at 102 gwei, the 0.001 MON contract minimum is far below cost; raise `minBet` with `setProtocolParameters` before mainnet (see SEC-11).
 
+### SEC-27: One missing oracle node blocked settlement (Medium, liveness) ✅
+**Found** by the multi-wallet test on Monad testnet (2026-09-26): ETH round 3 could not settle because the report set at 1790430060 had fewer than 5 signatures. Two independent archives (keeper and relay) both captured complete sets 10 s before and after, so one RedStone node really skipped that report. With 5-of-5, the round could only be refunded after the timeout.
+**Fix.** Deploy with 4 of 5 (still a strict majority). One missing node no longer blocks a round.
+**Trade-off.** With all 5 reports available, the submitter can choose which 4 to send. The median of 4 is the mean of the middle two, so the choice moves the price at most within the spread between the 2nd and 4th node values; in captured data the nodes' values are identical or differ by cents. A round decided by less than that spread is effectively a tie.
+**Test.** `test/contract_evm.test.js`: with real captured packages, a 4-of-5 contract rejects 3 signatures and settles with 4 at their median. `[SEC-02]` still proves a chosen 3-of-5 subset is rejected.
+
+### SEC-28: Unobservable oracle reports (High, liveness) ⬜
+**Found** by the multi-wallet test on testnet (2026-09-26): BTC round 3 locked but could not settle; neither the keeper's nor the relay's archive ever saw a report for its close timestamp (1790431040), while the reports 10 s before and after were complete. Measured at 5 polls/s: most reports arrive ~12 s after their timestamp and stay "latest" ~10 s, but some arrive ~22 s late and are replaced after 0.3 s. The gateway sits behind CloudFront with a per-IP rate limit (5 req/s from one IP got a 403 block), so faster polling is not an option. Relay archive over a short window: 1 of 8 timestamps missing on all four feeds at once (≈12%). Each round needs two pinned timestamps, so roughly 1 in 5 contested rounds would end refunded.
+**Current behaviour (safe):** such a round is refundable in full after the 10-minute timeout, directly by each bettor (SEC-26). No funds are at risk, but players lose network fees and time.
+**Options (decision needed):**
+- [ ] A. Free: accept the earliest report at or after the pinned time within a short window, with a challenge period in which anyone can replace it with an earlier valid report (final price = earliest report anyone captured). Removes most refunds; adds ~1 min to payouts and contract complexity.
+- [ ] B. Paid: Pyth with an API key (fetch by timestamp, sub-second updates). The original contract (commit dc67457) was built for it.
+- [x] Mitigated: archive backs off on 403/429 so a block clears instead of being prolonged.
+
 ### SEC-23: Oracle licence and terms (High, legal) 🟡
 RedStone's EVM connector package ships its Solidity under **BUSL-1.1** (its package.json says MIT; the licence grant text is not included). We do not use that code: `SignedPriceOracle.sol` is an independent MIT implementation of the public data-package format. Whether RedStone's free gateway data may be used in production without an agreement is **not confirmed**.
 - [x] No RedStone library code in the contracts.
+- [x] Licence checked 2026-09-26: `redstone-finance/redstone-oracles-monorepo` is BUSL-1.1 (licensor Distributed Data Labs), granting only non-production use of the *code*, with no Additional Use Grant. It does not address use of the *data* served by the public gateway. (Note: `github.com/microsoft/RedStone` is an unrelated Microsoft LLM-dataset project under MIT.)
 - [ ] Get written confirmation from RedStone that production use of `redstone-primary-prod` via the public gateway is allowed, or agree terms.
 - [ ] Re-check the signer set before deploy (`src/oracle.js`; `npm run deploy -- --dry-run` verifies all 5 sign right now).
 

@@ -1,11 +1,12 @@
 /**
  * main.js
- * Horizon UI controller: wires AMM state, the wallet, and the canvas together.
+ * Horizon UI controller: wires market data, the contract's rounds, the wallet and the canvas together.
+ * Everything shown comes from the contract (via LiveRounds / ChainHistory) or the price feeds.
  */
 
 import { ethers } from 'ethers';
 import { HorizonEngine } from './HorizonEngine.js';
-import { AMMState } from './AMMState.js';
+import { MarketState } from './MarketState.js';
 import { Web3Manager } from './Web3Manager.js';
 import { PulseFeed } from './PulseFeed.js';
 import { ChainHistory } from './ChainHistory.js';
@@ -57,9 +58,7 @@ export function startApp() {
     strikeVal: $('strike-val'),
     gapVal: $('gap-val'),
     balance: $('balance-val'),
-    modeDemo: $('mode-demo'),
-    modeLive: $('mode-live'),
-    faucet: $('faucet-btn'),
+    networkBadge: $('network-badge'),
     walletBtn: $('wallet-btn'),
     walletLabel: $('wallet-label'),
     ledgerBtn: $('ledger-btn'),
@@ -101,10 +100,38 @@ export function startApp() {
 
   let dashboard = null; // created after the wallet, which re-renders it on connect
   let chainHistory = null; // contract event reader, shared by the Dashboard, Pulse board and results strip
-  let liveRounds = null;   // Live mode: the active market's on-chain round and the wallet's positions
+  let liveRounds = null;   // the active market's on-chain round and the wallet's positions
+  let pulse = null;
   let marketButtons = [...document.querySelectorAll('#market-switch .market')];
-  let isLive = false;
-  let phase = null;
+
+  // ---------------------------------------------------------------------------
+  // Boot screen: each step is ticked by the real event; the page shows once all three are done
+  // (or after 9 s, with any step still loading marked, so nobody waits on a slow source)
+  // ---------------------------------------------------------------------------
+  const bootDone = new Set();
+  let bootFinished = false;
+  function finishBoot() {
+    if (bootFinished) return;
+    bootFinished = true;
+    setTimeout(() => {
+      $('boot').classList.add('done');
+      requestAnimationFrame(updateSafeArea);
+      // First visit: the guide opens once the page is ready, not over the loader
+      let seenGuide = true;
+      try { seenGuide = localStorage.getItem('mp.seenGuide') === '1'; } catch (_) { /* storage unavailable: don't nag */ }
+      if (!seenGuide) openGuide();
+    }, 380);
+  }
+  function bootStep(name) {
+    if (bootDone.has(name)) return;
+    bootDone.add(name);
+    document.querySelector(`[data-boot="${name}"]`)?.classList.add('ok');
+    if (['network', 'prices', 'round'].every((n) => bootDone.has(n))) finishBoot();
+  }
+  setTimeout(() => {
+    document.querySelectorAll('[data-boot]:not(.ok)').forEach((li) => li.classList.add('slow'));
+    finishBoot();
+  }, 9000);
 
   // ---------------------------------------------------------------------------
   // Toast
@@ -125,37 +152,26 @@ export function startApp() {
   // Wallet
   // ---------------------------------------------------------------------------
   const web3 = new Web3Manager({
-    connected: async ({ account, balance, protocolState }) => {
+    connected: ({ account, balance }) => {
       el.walletLabel.textContent = shortAddr(account);
       el.walletBtn.classList.add('connected');
-      if (isLive) el.balance.textContent = balance ?? '—';
+      el.balance.textContent = balance ?? '—';
       dashboard?.render();
       toast('Wallet connected', `${shortAddr(account)} on ${getConfig().name}`);
-
-      // Live odds use the contract's own parameters; if any cannot be read, say so rather than
-      // showing odds computed from assumed values
-      const p = protocolState || {};
-      const needed = ['totalFeeBps', 'creatorFeeBps', 'keeperFeeBps', 'treasuryFeeBps', 'lockBufferSeconds', 'minBetWei'];
-      if (needed.every((k) => p[k] !== undefined && p[k] !== null)) {
-        amm.setProtocolParameters({
-          feeBps: p.totalFeeBps,
-          creatorFeeBps: p.creatorFeeBps,
-          keeperFeeBps: p.keeperFeeBps,
-          treasuryFeeBps: p.treasuryFeeBps,
-          lockBuffer: p.lockBufferSeconds,
-          minBet: Number(ethers.formatEther(p.minBetWei))
-        });
-      } else {
-        toast('Could not read the contract', 'Protocol fees are unavailable, so live odds cannot be shown. Check the network and contract address.', { error: true, sticky: true });
-      }
       liveRounds?.sync();
+      pulse?.refresh();
       renderLedger();
     },
     balanceUpdated: (balance) => {
-      if (isLive) el.balance.textContent = balance ?? '—';
+      el.balance.textContent = balance ?? '—';
+      paintOdds();
     },
     txPending: ({ side, amount }) => {
-      toast('Confirm in your wallet', `${amount} MON on ${sideName(side)}`, { sticky: true });
+      const st = liveRounds?.state;
+      const left = st && st.phase === 'open' ? Math.floor((st.betCloseAt - Date.now()) / 1000) : null;
+      toast('Confirm in your wallet', left !== null && left < 25
+        ? `${amount} MON on ${sideName(side)} · bets close in ${left}s: a bet that arrives later fails and still pays the network fee`
+        : `${amount} MON on ${sideName(side)}`, { sticky: true });
     },
     txSuccess: ({ txHash, side, amount }) => {
       toast('Bet sent', `${amount} MON on ${sideName(side)}`, { link: `${getConfig().explorerUrl}/tx/${txHash}` });
@@ -166,71 +182,24 @@ export function startApp() {
     accountChanged: (account) => {
       el.walletLabel.textContent = shortAddr(account);
       dashboard?.render();
+      pulse?.refresh();
       renderLedger();
     },
     disconnected: () => {
       el.walletLabel.textContent = 'Connect';
       el.walletBtn.classList.remove('connected');
+      el.balance.textContent = '—';
       dashboard?.render();
+      renderLedger();
     }
   });
 
 
+  // Wallet balance on Monad; null until a wallet is connected and read
   function currentBalance() {
-    return isLive ? parseFloat(web3.balance) || 0 : amm.userBalance;
+    const b = parseFloat(web3.balance);
+    return Number.isFinite(b) ? b : null;
   }
-
-  function renderBalance() {
-    el.balance.textContent = isLive ? (web3.balance ?? '—') : fmtMon(amm.userBalance);
-  }
-
-  function setMode(live) {
-    isLive = live;
-    el.modeDemo.classList.toggle('active', !live);
-    el.modeLive.classList.toggle('active', live);
-    el.modeDemo.setAttribute('aria-pressed', String(!live));
-    el.modeLive.setAttribute('aria-pressed', String(live));
-    el.faucet.classList.toggle('hidden', live);
-    renderBalance();
-    pulse.setMode(live ? 'live' : 'demo');
-    amm.setLiveMode(live);
-    if (live) {
-      chainHistory?.start();
-      liveRounds?.start(amm.activeMarketKey);
-    } else {
-      liveRounds?.stop();
-      phase = null;
-    }
-    renderLedger();
-    document.getElementById('dash-demo-note').classList.toggle('hidden', live);
-    paintRecent();
-  }
-
-  el.modeDemo.addEventListener('click', () => setMode(false));
-  document.getElementById('dash-go-live').addEventListener('click', () => el.modeLive.click());
-  el.modeLive.addEventListener('click', async () => {
-    if (!getConfig().contractAddress) {
-      toast('Live mode is not available', 'No contract address is configured for this network.', { error: true });
-      return;
-    }
-    setMode(true);
-    if (!web3.account) {
-      const res = await web3.connect();
-      if (!res.success) {
-        setMode(false);
-        toast('Live mode needs a wallet', res.error || 'Connect a browser wallet to continue.', { error: true });
-        return;
-      }
-    }
-    renderBalance();
-    renderLedger();
-  });
-
-  el.faucet.addEventListener('click', () => {
-    amm.userBalance += 500;
-    amm.emit('balanceChanged', amm.userBalance);
-    toast('Demo balance topped up', '+500 demo MON');
-  });
 
   el.walletBtn.addEventListener('click', async () => {
     if (!web3.account) {
@@ -247,7 +216,7 @@ export function startApp() {
     if (error || !web3.account) {
       body.innerHTML = `
         <p class="modal-text">${escapeHtml(error || 'No browser wallet found.')}</p>
-        <p class="modal-text">Install an EVM wallet such as MetaMask or Rabby, then connect again. Demo mode works without a wallet.</p>
+        <p class="modal-text">Install an EVM wallet such as MetaMask or Rabby, add ${escapeHtml(cfg.name)}, then connect again. You can watch rounds without a wallet.</p>
         <div class="modal-actions"><button class="solid-btn" data-close="wallet-modal">Got it</button></div>`;
     } else {
       body.innerHTML = `
@@ -260,11 +229,23 @@ export function startApp() {
         </div>`;
       $('wallet-disconnect').addEventListener('click', () => {
         web3.disconnect();
-        setMode(false);
         closeModal('wallet-modal');
       });
     }
     openModal('wallet-modal');
+  }
+
+  // Contract parameters, read once without a wallet: fee and minimum bet (null until read)
+  let protocolFeeBps = null;
+  let minBetMon = null;
+  async function loadProtocolParameters() {
+    const p = await web3.fetchLiveProtocolFees();
+    if (p?.totalFeeBps !== undefined) {
+      protocolFeeBps = p.totalFeeBps;
+      $('guide-fee').textContent = `${(protocolFeeBps / 100).toFixed(1)}%`;
+      bootStep('network');
+    }
+    if (p?.minBetWei !== undefined) minBetMon = Number(ethers.formatEther(p.minBetWei));
   }
 
   // ---------------------------------------------------------------------------
@@ -274,7 +255,7 @@ export function startApp() {
 
   // How it works: shown once on the first visit, reopened from the ? button or the ? key
   function openGuide() {
-    $('guide-fee').textContent = `${(amm.feeBps / 100).toFixed(1)}%`;
+    $('guide-fee').textContent = protocolFeeBps === null ? '—' : `${(protocolFeeBps / 100).toFixed(1)}%`;
     openModal('guide-modal');
     try { localStorage.setItem('mp.seenGuide', '1'); } catch (_) { /* storage unavailable */ }
   }
@@ -333,7 +314,7 @@ export function startApp() {
     if (!name) return fail('Enter an asset name.');
     if (!/^[A-Z0-9][A-Z0-9/ .-]{0,15}$/.test(symbol)) return fail('Enter a symbol such as SUI/USD.');
     if (!/^[A-Za-z0-9_]{1,31}$/.test(feed)) return fail('The feed ID is a RedStone feed name such as SUI (letters, digits, underscores).');
-    if (!isLive || !web3.account) return fail('Switch to Live and connect a wallet to create a market.');
+    if (!web3.account) return fail('Connect a wallet to create a market.');
 
     errorEl.classList.add('hidden');
     const submit = $('cm-submit');
@@ -351,8 +332,8 @@ export function startApp() {
   });
 
   $('claim-royalties').addEventListener('click', async () => {
-    if (!isLive || !web3.account) {
-      toast('Live mode only', 'Creator fees are paid on-chain to the wallet that created the market.');
+    if (!web3.account) {
+      toast('Connect a wallet', 'Creator fees are paid on-chain to the wallet that created the market.');
       return;
     }
     const m = amm.getActiveMarket();
@@ -450,7 +431,7 @@ export function startApp() {
     const d = market.decimals;
     paintOfficial(market);
     const ref = decidingPrice(market, price);
-    el.heroPrice.textContent = market.ticks.length ? fmtPrice(price, d) : '—';
+    el.heroPrice.textContent = price === null ? '—' : fmtPrice(price, d);
     const chg = market.change24h ?? null;
     el.assetChange.textContent = `${fmtChange(chg)} 24h`;
     el.assetChange.className = `asset-change num ${chg === null ? '' : chg >= 0 ? 'pos' : 'neg'}`;
@@ -467,7 +448,7 @@ export function startApp() {
         el.gapVal.textContent = `${gap >= 0 ? '▲ +' : '▼ −'}${Math.abs(gap).toFixed(d)} (${Math.abs(pct).toFixed(3)}%)`;
         el.gapVal.className = `cell-val num ${gap > 0 ? 'above' : gap < 0 ? 'below' : ''}`;
       }
-    } else if (isLive) {
+    } else {
       const st = liveRounds?.state;
       const toLock = st ? (st.lockAt - Date.now()) / 1000 : null;
       el.strikeVal.textContent = !st || st.error ? '—'
@@ -476,22 +457,10 @@ export function startApp() {
       el.strikeVal.classList.remove('locked');
       el.gapVal.textContent = '—';
       el.gapVal.className = 'cell-val num';
-    } else {
-      const toLock = market.roundTimer - amm.lockBuffer;
-      el.strikeVal.textContent = toLock > 0 ? `Sets in ${fmtClock(toLock)}` : 'Setting…';
-      el.strikeVal.classList.remove('locked');
-      el.gapVal.textContent = '—';
-      el.gapVal.className = 'cell-val num';
     }
   }
 
-  function postBetMultiplier(side, stake) {
-    const m = amm.getActiveMarket();
-    const sidePool = side === 'UP' ? m.poolUp : m.poolDown;
-    const total = m.poolUp + m.poolDown + stake;
-    if (sidePool + stake <= 0) return 0;
-    return (total * (1 - amm.feeBps / 10000)) / (sidePool + stake);
-  }
+  const postBetMultiplier = (side, stake) => amm.multiplierAfter(side, stake);
 
   // Whole MON for big pools; small pools (real testnet bets) keep their decimals instead of showing 0
   const fmtPool = (v) => (v >= 100 ? Math.round(v).toLocaleString('en-US') : v.toLocaleString('en-US', { maximumFractionDigits: 2 }));
@@ -506,12 +475,12 @@ export function startApp() {
       gasPriceWei = null;
     }
   }
-  setInterval(() => { if (isLive) refreshGasPrice(); }, 30000);
+  setInterval(refreshGasPrice, 30000);
 
   function paintFee(stake) {
     const node = $('stake-fee');
     const st = liveRounds?.state;
-    if (!isLive || !gasPriceWei || !st || st.error) {
+    if (!gasPriceWei || !st || st.error) {
       node.classList.add('hidden');
       return;
     }
@@ -535,16 +504,34 @@ export function startApp() {
     for (const side of ['UP', 'DOWN']) {
       const multEl = side === 'UP' ? el.upMult : el.downMult;
       const winEl = side === 'UP' ? el.upWin : el.downWin;
-      const mult = stake > 0 ? postBetMultiplier(side, stake) : parseFloat(side === 'UP' ? odds.multUp : odds.multDown);
+      const mult = stake > 0 ? postBetMultiplier(side, stake) : (side === 'UP' ? odds.multUp : odds.multDown);
       const opposingPool = side === 'UP' ? m.poolDown : m.poolUp;
-      multEl.textContent = mult > 0 && opposingPool > 0 ? `${mult.toFixed(2)}×` : '—';
-      if (opposingPool <= 0) winEl.textContent = `Refunded unless someone takes ${side === 'UP' ? 'Fall' : 'Rise'}`;
+      multEl.textContent = mult && opposingPool > 0 ? `${mult.toFixed(2)}×` : '—';
+      if (amm.feeBps === null) winEl.textContent = 'Reading the round…';
+      else if (opposingPool <= 0) winEl.textContent = `Refunded unless someone takes ${side === 'UP' ? 'Fall' : 'Rise'}`;
       else if (stake <= 0) winEl.textContent = 'Enter a stake';
-      else if (stake > balance) winEl.textContent = 'Above balance';
-      else winEl.innerHTML = `Pays ≈ ${fmtMon(stake * mult)} <span class="profit">+${fmtMon(stake * mult - stake)}</span>`;
+      else if (balance !== null && stake > balance) winEl.textContent = 'Above balance';
+      else {
+        // Profit can be negative: when your stake dominates the pool, the fee exceeds what you win
+        const profit = stake * mult - stake;
+        winEl.innerHTML = `Pays ≈ ${fmtMon(stake * mult)} <span class="profit${profit < 0 ? ' loss' : ''}">${profit < 0 ? '−' : '+'}${fmtMon(Math.abs(profit))}</span>`;
+      }
     }
 
     const total = m.poolUp + m.poolDown;
+    if (m.roundId === null) {
+      // The round has not been read from the contract yet: show nothing rather than an empty pool
+      el.tugTotal.textContent = '—';
+      el.tugUpLabel.textContent = '—';
+      el.tugDownLabel.textContent = '—';
+      $('up-pool').textContent = '—';
+      $('down-pool').textContent = '—';
+      $('up-players').textContent = '';
+      $('down-players').textContent = '';
+      el.tugUp.style.width = '50%';
+      el.tugDown.style.width = '50%';
+      return;
+    }
     const upPct = total > 0 ? (m.poolUp / total) * 100 : 50;
     el.tugUp.style.width = `${upPct}%`;
     el.tugDown.style.width = `${100 - upPct}%`;
@@ -564,11 +551,10 @@ export function startApp() {
     // Stats pane
     $('stat-pool').textContent = `${fmtMon(total)} MON`;
     $('stat-split').textContent = `${fmtPool(m.poolUp)} / ${fmtPool(m.poolDown)}`;
-    $('stat-fee').textContent = `${(amm.feeBps / 100).toFixed(2)}%`;
-    $('demo-note').classList.toggle('hidden', isLive);
-    if (stake > 0) {
-      const preUp = parseFloat(odds.multUp) || 1;
-      const preDn = parseFloat(odds.multDown) || 1;
+    $('stat-fee').textContent = amm.feeBps === null ? '—' : `${(amm.feeBps / 100).toFixed(2)}%`;
+    if (stake > 0 && odds.multUp && odds.multDown) {
+      const preUp = odds.multUp;
+      const preDn = odds.multDown;
       const dilUp = Math.max(0, (preUp - postBetMultiplier('UP', stake)) / preUp) * 100;
       const dilDn = Math.max(0, (preDn - postBetMultiplier('DOWN', stake)) / preDn) * 100;
       $('stat-impact').textContent = `−${dilUp.toFixed(1)}% ▲ / −${dilDn.toFixed(1)}% ▼`;
@@ -577,22 +563,13 @@ export function startApp() {
     }
   }
 
-  // Winning side of the active market's recent rounds (▲ Rise, ▼ Fall, · refunded), newest last.
-  // Demo: this session's simulated rounds. Live: settled and cancelled rounds read from the contract.
+  // Winning side of the active market's recent rounds with bets (▲ Rise, ▼ Fall, · refunded), newest last
   function paintRecent() {
-    const key = amm.activeMarketKey;
-    let sides;
-    if (isLive) {
-      const id = SUPPORTED_MARKETS[key]?.marketId.toLowerCase();
-      sides = (chainHistory?.roundsList() || [])
-        .filter((r) => r.marketId === id)
-        .sort((a, b) => b.roundId - a.roundId)
-        .map((r) => (r.status === 'settled' ? r.winningSide : null));
-    } else {
-      sides = amm.roundHistory
-        .filter((h) => h.marketKey === key)
-        .map((h) => (h.winner === 'UP' || h.winner === 'DOWN' ? h.winner : null));
-    }
+    const id = SUPPORTED_MARKETS[amm.activeMarketKey]?.marketId.toLowerCase();
+    const sides = (chainHistory?.roundsList() || [])
+      .filter((r) => r.marketId === id && r.up + r.down > 0)
+      .sort((a, b) => b.roundId - a.roundId)
+      .map((r) => (r.status === 'settled' ? r.winningSide : null));
     const node = $('recent-results');
     const last = sides.slice(0, 8).reverse();
     node.innerHTML = last.length
@@ -600,39 +577,10 @@ export function startApp() {
       : '—';
   }
 
-  function paintPhase(market) {
-    if (isLive) return; // Live mode is painted from the contract's round (applyLive)
-    const remaining = market.roundTimer;
-    const lockBuffer = amm.lockBuffer;
-    const next = remaining > lockBuffer ? 'open' : 'locked';
 
-    if (next !== phase) {
-      phase = next;
-      el.console.classList.toggle('locked', phase === 'locked');
-      el.betUp.disabled = phase === 'locked';
-      el.betDown.disabled = phase === 'locked';
-      el.phaseLabel.textContent = phase === 'open' ? 'Betting open' : 'Strike locked';
-    }
-
-    const span = phase === 'open' ? market.roundDuration - lockBuffer : lockBuffer;
-    const left = phase === 'open' ? remaining - lockBuffer : remaining;
-    const frac = span > 0 ? Math.max(0, Math.min(1, left / span)) : 0;
-    // Last seconds before bets close: the status row pulses so nobody misses the window
-    const closing = phase === 'open' && left <= 5;
-    if (closing !== el.console.classList.contains('closing')) {
-      el.console.classList.toggle('closing', closing);
-      el.phaseLabel.textContent = closing ? 'Closing' : phase === 'open' ? 'Betting open' : 'Strike locked';
-    }
-    el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - frac)}`;
-    el.phaseTime.innerHTML = `<span class="phase-verb">${phase === 'open' ? 'closes in' : 'settles in'} </span>${fmtClock(left)}`;
-
-    engine.setRound({ remaining, duration: market.roundDuration, lockBuffer, phase });
-    if ((market.lockPrice || null) !== engine.strike) engine.setStrike(market.lockPrice);
-  }
-
-  // Demo: this session's simulated positions. Live: the wallet's positions from the contract's events.
+  // The connected wallet's positions, from the contract's events
   function positionsList() {
-    return isLive ? (liveRounds?.positions(web3.account) || []) : amm.userPositions;
+    return liveRounds?.positions(web3.account) || [];
   }
 
   function activePositionsForMarket() {
@@ -699,14 +647,14 @@ export function startApp() {
     el.ledgerCount.textContent = claimable || active;
 
     if (!positions.length) {
-      el.positionsList.innerHTML = isLive && !web3.account
+      el.positionsList.innerHTML = !web3.account
         ? '<div class="empty">Connect your wallet to see your positions.</div>'
         : '<div class="empty">No positions yet.<br>Pick Rise or Fall to join the current round.</div>';
       return;
     }
 
     // Live: several claimable rounds in one market are claimed in one transaction (one network fee)
-    const claimables = isLive ? positions.filter((p) => (p.status === 'Won' || p.status === 'Refunded') && !p.claimed) : [];
+    const claimables = positions.filter((p) => (p.status === 'Won' || p.status === 'Refunded') && !p.claimed);
     const byMarket = new Map();
     for (const p of claimables) byMarket.set(p.marketId, [...(byMarket.get(p.marketId) || []), p]);
     const claimAll = [...byMarket.entries()].filter(([, list]) => list.length > 1).map(([marketId, list]) =>
@@ -740,7 +688,7 @@ export function startApp() {
 
   el.positionsList.addEventListener('click', async (e) => {
     const all = e.target.closest('[data-claim-all]');
-    if (all && isLive) {
+    if (all) {
       all.disabled = true;
       const rounds = all.dataset.rounds.split(',').map(Number);
       const res = await web3.claimBatch(all.dataset.claimAll, rounds);
@@ -756,50 +704,20 @@ export function startApp() {
     if (!btn) return;
     const pos = positionsList().find((p) => p.id === btn.dataset.claim);
     if (!pos) return;
-    if (isLive) {
-      if (!web3.account) return toast('Wallet not connected', 'Connect your wallet to claim.', { error: true });
-      btn.disabled = true;
-      const res = await web3.claimPayout(pos.marketId, pos.roundId);
-      if (!res.success) {
-        btn.disabled = false;
-        toast('Claim failed', res.error || 'Rejected in wallet', { error: true });
-        return;
-      }
-      toast('Payout sent', 'It appears in your ledger once the transaction is in a block.', { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
-      setTimeout(() => web3.fetchBalance(), 2500);
+    if (!web3.account) return toast('Wallet not connected', 'Connect your wallet to claim.', { error: true });
+    btn.disabled = true;
+    const res = await web3.claimPayout(pos.marketId, pos.roundId);
+    if (!res.success) {
+      btn.disabled = false;
+      toast('Claim failed', res.error || 'Rejected in wallet', { error: true });
       return;
     }
-    amm.claimReward(pos.id);
+    toast('Payout sent', 'It appears in your ledger once the transaction is in a block.', { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
+    setTimeout(() => web3.fetchBalance(), 2500);
   });
 
+  // Rounds with bets that ended on-chain, newest first
   function renderHistory() {
-    if (isLive) return renderLiveHistory();
-    const history = amm.roundHistory;
-    if (!history.length) {
-      el.historyList.innerHTML = '<div class="empty">No settled rounds yet.<br>Results appear here as rounds close.</div>';
-      return;
-    }
-    el.historyList.innerHTML = history.slice(0, 60).map((h) => {
-      const cls = h.winner === 'UP' ? 'up' : h.winner === 'DOWN' ? 'down' : 'neutral';
-      const glyph = h.winner === 'UP' ? '▲' : h.winner === 'DOWN' ? '▼' : '◆';
-      const outcome = h.winner === 'UP' ? 'Rise won' : h.winner === 'DOWN' ? 'Fall won' : h.winner === 'DRAW' ? 'Tie · refunded' : 'One-sided · refunded';
-      return `
-        <div class="row">
-          <span class="row-glyph ${cls}">${glyph}</span>
-          <div class="row-main">
-            <span class="row-title">${escapeHtml(h.market)} · ${outcome}</span>
-            <span class="row-sub num">Round ${h.roundId} · ${h.lockPrice.toLocaleString('en-US')} → ${h.closePrice.toLocaleString('en-US')}</span>
-          </div>
-          <div class="row-end">
-            <span class="row-amount num">${fmtMon(h.totalPool)}</span>
-            <span class="tag num">${escapeHtml(h.finalMult)}</span>
-          </div>
-        </div>`;
-    }).join('');
-  }
-
-  // Live: rounds that ended on-chain, newest first
-  function renderLiveHistory() {
     const rounds = (chainHistory?.roundsList() || []).filter((r) => r.up + r.down > 0).slice(0, 60);
     if (!rounds.length) {
       el.historyList.innerHTML = '<div class="empty">No rounds with bets have ended on-chain yet.</div>';
@@ -892,11 +810,12 @@ export function startApp() {
   }
 
   // ---------------------------------------------------------------------------
-  // AMM state
+  // Market data
   // ---------------------------------------------------------------------------
-  const amm = new AMMState({
+  const amm = new MarketState({
     tick: ({ market, isActiveMarket, price, allMarkets, vol }) => {
       if (isActiveMarket) {
+        bootStep('prices');
         engine.pushTick(price, vol || 0);
         const now = performance.now();
         if (now - lastHeroPaint >= 80) {
@@ -909,13 +828,6 @@ export function startApp() {
       paintTickers(allMarkets);
     },
 
-    timerUpdate: ({ market }) => {
-      paintPhase(market);
-      if (!market.lockPrice) paintReadout(market, market.price);
-    },
-
-    oddsUpdated: () => paintOdds(),
-
     official: ({ market }) => {
       if (market !== amm.getActiveMarket()) return;
       paintReadout(market, market.price);
@@ -926,7 +838,7 @@ export function startApp() {
       if (status === 'NOT_CONFIGURED') {
         el.feedLatency.textContent = 'No price feed';
         el.feedDot.classList.remove('live');
-        toast('No price feed configured', 'Set NEXT_PUBLIC_PRICE_RELAY_URL to the price relay (see .env.example).', { error: true, sticky: true });
+        toast('No price feed configured', 'Set NEXT_PUBLIC_PRICE_SOURCE or NEXT_PUBLIC_PRICE_RELAY_URL (see .env.example).', { error: true, sticky: true });
         return;
       }
       el.feedLatency.textContent = latency === null || latency === undefined ? source
@@ -943,56 +855,20 @@ export function startApp() {
       });
       el.assetName.textContent = SUPPORTED_MARKETS[key]?.name || key;
       el.assetPair.textContent = market.symbol.replace('/', ' / ');
-      el.roundId.textContent = market.roundId;
-      phase = null;
-      engine.reset(market.price, market.decimals, market.ticks);
+      el.roundId.textContent = '—';
+      // Round fields belong to the previous market until the contract read for this one arrives
+      Object.assign(market, { roundId: null, poolUp: 0, poolDown: 0, upBettors: 0, downBettors: 0, lockPrice: null });
+      amm.feeBps = null;
+      engine.reset(market.price, market.decimals);
       engine.store.load(SUPPORTED_MARKETS[key]);
-      engine.setStrike(market.lockPrice);
-      engine.setUserPositions(amm.userPositions.filter((p) => p.marketKey === key));
-      paintPhase(market);
+      engine.setStrike(null);
+      engine.setUserPositions([]);
+      lastHeroPrice = null;
       paintReadout(market, market.price);
       paintOdds();
       paintPositionChip(market, market.price);
       paintRecent();
-      if (isLive) liveRounds?.start(key);
-    },
-
-    roundSettled: (data) => {
-      if (data.marketKey === amm.activeMarketKey) showResult(data);
-      paintRecent();
-      renderLedger();
-      pulse.refreshDemo();
-    },
-
-    newRoundStarted: (market) => {
-      el.roundId.textContent = market.roundId;
-      engine.setStrike(null);
-      engine.setUserPositions([]);
-      paintOdds();
-      paintPositionChip(market, market.price);
-    },
-
-    balanceChanged: () => {
-      if (!isLive) renderBalance();
-      paintOdds();
-    },
-
-    positionPlaced: (pos) => {
-      renderLedger();
-      engine.setUserPositions(amm.userPositions.filter((p) => p.marketKey === amm.activeMarketKey));
-      paintPositionChip(amm.getActiveMarket(), amm.getActiveMarket().price);
-      const btn = pos.side === 'UP' ? el.betUp : el.betDown;
-      const r = btn.getBoundingClientRect();
-      engine.emitBet(pos.side, r.left + r.width / 2, r.top + r.height / 3, pos.amount);
-      btn.classList.remove('bet-pop');
-      void btn.offsetWidth;
-      btn.classList.add('bet-pop');
-      if (!isLive) toast(`${sideName(pos.side)} · ${fmtMon(pos.amount)} MON`, `Round ${pos.roundId} · entered at ${pos.entryMult}×`);
-    },
-
-    positionClaimed: (pos) => {
-      renderLedger();
-      if (!isLive) toast('Claimed', `+${fmtMon(pos.payout)} demo MON`);
+      liveRounds?.start(key);
     }
   });
 
@@ -1003,17 +879,14 @@ export function startApp() {
     const amount = parseFloat(el.stake.value) || 0;
     const m = amm.getActiveMarket();
     if (amount <= 0) return toast('Enter a stake', 'Choose how much MON to put on this round.', { error: true });
-    if (amount > currentBalance()) return toast('Stake above balance', `You have ${fmtMon(currentBalance())} MON available.`, { error: true });
-
-    const proof = amm.antiScrapeShield ? amm.antiScrapeShield.generateProofOfAction(side, amount, m.roundId) : null;
-    const odds = amm.getLiveOdds();
-    const expectedMultiplier = side === 'UP' ? odds.multUp : odds.multDown;
-
-    if (isLive) {
-      if (!web3.account) {
-        const res = await web3.connect();
-        if (!res.success) return toast('Wallet not connected', res.error || 'Connect a wallet to bet in Live mode.', { error: true });
-      }
+    if (!web3.account) {
+      const res = await web3.connect();
+      if (!res.success) return toast('Wallet not connected', res.error || 'Connect a wallet to bet.', { error: true });
+    }
+    const balance = currentBalance();
+    if (balance !== null && amount > balance) return toast('Stake above balance', `You have ${fmtMon(balance)} MON available.`, { error: true });
+    if (minBetMon !== null && amount < minBetMon) return toast('Stake below the minimum', `The contract's minimum bet is ${minBetMon} MON.`, { error: true });
+    {
       const st = liveRounds?.state;
       if (!st || st.error) return toast('Round not loaded', st?.error || 'Reading the round from Monad…', { error: true });
       if (st.phase !== 'open' && st.phase !== 'idle') return toast('Bets are closed', 'Wait for the next round to open.', { error: true });
@@ -1029,9 +902,6 @@ export function startApp() {
       const r = btn.getBoundingClientRect();
       engine.emitBet(side, r.left + r.width / 2, r.top + r.height / 3, amount);
       setTimeout(() => { liveRounds?.sync(); web3.fetchBalance(); }, 2000);
-    } else {
-      const res = amm.placeBet(side, amount, { proof, expectedMultiplier });
-      if (!res.success) toast('Order not placed', res.reason, { error: true });
     }
   }
 
@@ -1046,7 +916,10 @@ export function startApp() {
     });
   });
   $('stake-max').addEventListener('click', () => {
-    el.stake.value = Math.floor(currentBalance());
+    const balance = currentBalance();
+    if (balance === null) return toast('Connect a wallet', 'Max uses your wallet balance.', { error: true });
+    // Leave room for the network fee
+    el.stake.value = Math.max(0, Math.floor((balance - 0.05) * 100) / 100);
     paintOdds();
   });
   $('stake-clear').addEventListener('click', () => {
@@ -1113,17 +986,14 @@ export function startApp() {
     return `${plural(item.winners || 0, 'winner')} · ${item.market}`;
   }
 
-  function renderPulse({ mode, paid, rounds, topMult, feed }) {
-    const badge = $('pulse-badge');
-    badge.textContent = mode === 'live' ? 'Live' : 'Demo';
-    badge.classList.toggle('live', mode === 'live');
-    $('pulse-note').textContent = mode === 'live'
-      ? 'All-time on-chain total for this contract. The feed shows recently claimed wins.'
-      : 'Demo rounds since you opened this page, with simulated players.';
-
+  function renderPulse({ ready, paid, rounds, topMult, feed }) {
     const big = $('pulse-paid');
+    if (!ready || paid === null) {
+      big.textContent = '—';
+      return;
+    }
     const prev = parseFloat(big.dataset.value || '0');
-    if (paid !== prev) {
+    if (paid !== prev || big.textContent === '—') {
       countTo(big, paid, paid >= 10000 ? 0 : 2, 1400);
       if (paid > prev) {
         big.classList.remove('bump');
@@ -1136,15 +1006,15 @@ export function startApp() {
 
     const list = $('pulse-feed');
     if (!feed.length) {
-      list.innerHTML = `<li class="empty-feed">${mode === 'live' ? 'No wins claimed recently.' : 'Results appear as rounds settle.'}</li>`;
+      list.innerHTML = '<li class="empty-feed">No wins claimed yet.</li>';
     } else {
       list.innerHTML = feed.slice(0, 4).map((item) => {
         const isNew = !seenFeedKeys.has(item.key);
         seenFeedKeys.add(item.key);
-        const side = item.side === 'UP' ? 'up' : 'down';
+        const side = item.side === 'UP' ? 'up' : item.side === 'DOWN' ? 'down' : '';
         return `
           <li class="feed-item ${side}${item.you ? ' you' : ''}${isNew ? ' new' : ''}">
-            <span class="feed-glyph">${item.side === 'UP' ? '▲' : '▼'}</span>
+            <span class="feed-glyph">${item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span>
             <span class="feed-text">${escapeHtml(feedLabel(item))}</span>
             <span class="feed-amt num">+${fmtMon(item.amount)}${item.mult ? `<small>${item.mult.toFixed(2)}×</small>` : ''}</span>
           </li>`;
@@ -1162,9 +1032,9 @@ export function startApp() {
     if (changed) requestAnimationFrame(updateSafeArea);
     if (!show) return;
     const item = tickerItems[tickerIndex % tickerItems.length];
-    const side = item.side === 'UP' ? 'up' : 'down';
-    const who = item.you ? 'You' : item.user ? item.user : plural(item.winners || 0, 'winner');
-    ticker.innerHTML = `<span class="${side}">${item.side === 'UP' ? '▲' : '▼'}</span> ${escapeHtml(who)} won ${fmtMon(item.amount)} MON on ${escapeHtml(item.market)}`;
+    const side = item.side === 'UP' ? 'up' : item.side === 'DOWN' ? 'down' : '';
+    const who = item.you ? 'You' : item.user;
+    ticker.innerHTML = `<span class="${side}">${item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span> ${escapeHtml(who)} won ${fmtMon(item.amount)} MON on ${escapeHtml(item.market)}`;
     ticker.style.animation = 'none';
     void ticker.offsetWidth;
     ticker.style.animation = '';
@@ -1179,7 +1049,6 @@ export function startApp() {
   const history = new ChainHistory(web3);
   chainHistory = history;
   history.onChange(() => {
-    if (!isLive) return;
     paintRecent();
     renderLedgerIfChanged();
   });
@@ -1196,6 +1065,7 @@ export function startApp() {
     renderLedger();
   }
 
+  const BET_CUTOFF_GUARD_S = 8;
   const LIVE_PHASES = {
     open: { label: 'Betting open', verb: 'closes in', bets: true },
     idle: { label: 'Ready', verb: '', bets: true },
@@ -1206,7 +1076,7 @@ export function startApp() {
   };
 
   function applyLive(st) {
-    if (!isLive || !st) return;
+    if (!st) return;
     const m = amm.getActiveMarket();
     if (st.error && st.roundId === undefined) {
       el.phaseLabel.textContent = 'Contract unreachable';
@@ -1216,6 +1086,8 @@ export function startApp() {
       return;
     }
     if (st.marketKey !== amm.activeMarketKey) return;
+    bootStep('network');
+    bootStep('round');
     const roundChanged = m.roundId !== st.roundId;
     m.roundId = st.roundId;
     m.poolUp = st.poolUp;
@@ -1232,8 +1104,9 @@ export function startApp() {
     const left = until ? Math.max(0, (until - now) / 1000) : null;
     el.console.classList.toggle('locked', !ph.bets);
     el.console.classList.toggle('closing', st.phase === 'open' && left <= 5);
-    // No bets in the last 3 s: they would likely land after the cutoff, revert, and still cost the fee
-    const canBet = ph.bets && !(st.phase === 'open' && left !== null && left <= 3);
+    // No bets in the last 8 s: confirming in a wallet takes seconds, and a bet that lands after the
+    // cutoff reverts and still pays the network fee
+    const canBet = ph.bets && !(st.phase === 'open' && left !== null && left <= BET_CUTOFF_GUARD_S);
     el.betUp.disabled = !canBet;
     el.betDown.disabled = !canBet;
     el.phaseLabel.textContent = st.phase === 'open' && left <= 5 ? 'Closing' : ph.label;
@@ -1253,7 +1126,7 @@ export function startApp() {
   }
 
   // The countdown ticks locally between contract reads (no extra network requests)
-  setInterval(() => { if (isLive && liveRounds?.state) applyLive(liveRounds.state); }, 500);
+  setInterval(() => { if (liveRounds?.state) applyLive(liveRounds.state); }, 500);
 
   refreshGasPrice();
 
@@ -1266,7 +1139,7 @@ export function startApp() {
       paintRecent();
     }
   });
-  const pulse = new PulseFeed({ web3, amm, history, onUpdate: renderPulse });
+  pulse = new PulseFeed({ web3, history, onUpdate: renderPulse });
 
   // ---------------------------------------------------------------------------
   // Views: Trade and the transparency Dashboard
@@ -1300,11 +1173,15 @@ export function startApp() {
   });
   $('official-cell').classList.toggle('hidden', !splitFeeds);
   setInterval(() => paintOfficial(amm.getActiveMarket()), 1000);
-  setMode(false);
-  let seenGuide = true;
-  try { seenGuide = localStorage.getItem('mp.seenGuide') === '1'; } catch (_) { /* storage unavailable: don't nag */ }
-  if (!seenGuide) openGuide();
+  el.networkBadge.textContent = getConfig().name;
+  if (!getConfig().contractAddress) {
+    toast('No contract configured', 'Set NEXT_PUBLIC_CONTRACT_ADDRESS (see .env.example).', { error: true, sticky: true });
+  }
+  loadProtocolParameters();
+  history.start();
+  pulse.refresh();
   amm.emit('marketChanged', amm.getActiveMarket());
+  refreshGasPrice();
   renderLedger();
   updateSafeArea();
   engine.start();

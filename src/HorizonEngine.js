@@ -82,38 +82,25 @@ export class HorizonEngine {
   // Public API
   // ---------------------------------------------------------------------------
 
-  reset(price, decimals = 2, history = []) {
+  /**
+   * Switch to a market. `price` is its last real price, or null if none has arrived yet. Nothing is
+   * drawn until there is a real price and the price history has finished loading (see render), so a
+   * refresh never shows a guessed price or an animated rescale.
+   */
+  reset(price, decimals = 2) {
     this.decimals = decimals;
-    const now = Date.now();
-    // Seed from the market's recent ticks, keeping only the latest run near the live price so
-    // placeholder prices from before the feed connected never show up as a fake jump
-    const recent = [];
-    for (let i = history.length - 1; i >= 0 && recent.length < 60; i--) {
-      if (Math.abs(history[i] - price) / price > 0.003) break;
-      recent.unshift(history[i]);
-    }
-    const seed = recent.length ? recent : [price];
-    this.ticks = seed.map((p, i) => ({ t: now - (seed.length - 1 - i) * 1000, p }));
-    // Without real history the seed is a placeholder; the first live tick replaces it
-    this.placeholder = recent.length === 0;
-    this.displayPrice = price;
-    this.anchor = price;
+    this.ticks = Number.isFinite(price) && price > 0 ? [{ t: Date.now(), p: price }] : [];
+    this.displayPrice = this.ticks.length ? price : null;
+    this.anchor = this.displayPrice;
     this.scale = null;
     this.flash = null;
+    this.ready = false;
   }
 
   pushTick(price, vol = 0) {
     if (!Number.isFinite(price) || price <= 0) return;
     const now = Date.now();
     this.store.push(price, vol, now);
-    if (this.placeholder) {
-      this.placeholder = false;
-      this.ticks = [{ t: now, p: price }];
-      this.displayPrice = price;
-      this.anchor = price;
-      this.scale = null;
-      return;
-    }
     const last = this.ticks[this.ticks.length - 1];
     // Collapse bursts of ticks within 120ms into one point to keep the path light
     if (last && now - last.t < 120) last.p = price;
@@ -134,7 +121,7 @@ export class HorizonEngine {
 
   /**
    * Live mode: the contract's own moments (ms since epoch). Gates are drawn at these exact times
-   * instead of the Demo round clock.
+   * as they are on the contract.
    */
   setLiveRound({ betCloseAt, lockAt, closeAt, phase, duration }) {
     const now = Date.now();
@@ -295,7 +282,15 @@ export class HorizonEngine {
     const ctx = this.ctx;
     const W = this.width;
     const H = this.height;
-    if (!W || !H || !this.ticks.length) return;
+    if (!W || !H || !this.ticks.length || this.store.loading) return;
+    // First frame with real data: start exactly at the latest price and scale, no glide from elsewhere
+    if (!this.ready) {
+      this.ready = true;
+      const last = this.ticks[this.ticks.length - 1].p;
+      this.displayPrice = last;
+      this.anchor = last;
+      this.scale = null;
+    }
 
     const dt = Math.min(0.1, (ts - this.lastFrame) / 1000);
     this.lastFrame = ts;

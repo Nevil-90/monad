@@ -121,7 +121,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/reports') {
     if (!feeds.includes(feed)) return send(res, 404, { error: 'unknown feed' });
     const reports = prices.reportsAt(feed, url.searchParams.get('ts'));
-    if (!reports) return send(res, 404, { error: 'no complete report set captured for that timestamp' });
+    if (!reports) return send(res, 404, { error: `only ${prices.countAt(feed, url.searchParams.get('ts'))} of ${prices.threshold} signatures captured for that timestamp` });
     return send(res, 200, reports);
   }
 

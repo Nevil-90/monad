@@ -34,15 +34,20 @@ export class ReportArchive {
   }
 
   start() {
+    let backoff = 0;
     const tick = async () => {
       try {
         await this.poll();
         this.status = { ok: true, lastPoll: Date.now(), error: null };
+        backoff = 0;
       } catch (err) {
         this.status = { ...this.status, ok: false, error: err.message };
-        this.log.error(`[archive] ${err.message}`);
+        // The free gateway rate-limits per IP (403/429 from its CDN): back off instead of hammering it
+        const limited = /\b(403|429)\b/.test(err.message);
+        backoff = limited ? Math.min(60000, Math.max(5000, backoff * 2)) : 0;
+        this.log.error(`[archive] ${err.message}${limited ? `; backing off ${backoff / 1000}s` : ''}`);
       }
-      this.timer = setTimeout(tick, this.pollMs);
+      this.timer = setTimeout(tick, this.pollMs + backoff);
     };
     tick();
   }
@@ -78,6 +83,11 @@ export class ReportArchive {
       const seriesCutoff = Date.now() - this.seriesKeepMs;
       for (const ts of this.medians.get(feed).keys()) if (ts < seriesCutoff) this.medians.get(feed).delete(ts);
     }
+  }
+
+  /** How many authorised signatures were captured for a feed at a timestamp in seconds */
+  countAt(feed, tsSec) {
+    return this.byFeed.get(feed)?.get(Number(tsSec) * 1000)?.size ?? 0;
   }
 
   /** Complete report set for a feed at a timestamp in seconds, or null if it was not captured */

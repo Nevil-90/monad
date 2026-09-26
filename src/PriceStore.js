@@ -16,6 +16,7 @@ export class PriceStore {
     this.bars1s = [];
     this.bars1m = [];
     this.loadToken = 0;
+    this.loading = false; // true while history for the current market is being fetched
   }
 
   reset() {
@@ -28,9 +29,18 @@ export class PriceStore {
     const token = ++this.loadToken;
     this.reset();
     if (!market) return;
+    this.loading = true;
+    try {
+      await this.loadFrom(market, token);
+    } finally {
+      if (token === this.loadToken) this.loading = false;
+    }
+  }
+
+  async loadFrom(market, token) {
     if (API_CONFIG.priceSource === 'redstone') {
       try {
-        const res = await fetch(`${API_CONFIG.priceRelayUrl}/history?feed=${market.feed}`);
+        const res = await fetch(`${API_CONFIG.priceRelayUrl}/history?feed=${market.feed}`, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const points = await res.json();
         if (token !== this.loadToken) return;
@@ -49,8 +59,8 @@ export class PriceStore {
       try {
         const base = `${API_CONFIG.coinbaseRestUrl}/products/${market.coinbase}`;
         const [candles, trades] = await Promise.all([
-          fetch(`${base}/candles?granularity=60`).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); }),
-          fetch(`${base}/trades?limit=1000`).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+          fetch(`${base}/candles?granularity=60`, { signal: AbortSignal.timeout(8000) }).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); }),
+          fetch(`${base}/trades?limit=1000`, { signal: AbortSignal.timeout(8000) }).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
         ]);
         if (token !== this.loadToken) return;
         const live = { s: this.bars1s, m: this.bars1m };
@@ -78,7 +88,7 @@ export class PriceStore {
     }
     try {
       const [s1, m1] = await Promise.all(urls.map(async (u) => {
-        const r = await fetch(u);
+        const r = await fetch(u, { signal: AbortSignal.timeout(8000) });
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         return r.json();
       }));

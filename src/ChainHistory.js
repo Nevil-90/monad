@@ -303,8 +303,8 @@ export class ChainHistory {
   summary() {
     const s = { betsCount: 0, riseIn: 0, fallIn: 0, wins: 0, refunds: 0, fees: 0, wallets: new Set() };
     for (const r of this.records) {
-      if (r.user) s.wallets.add(r.user.toLowerCase());
       if (r.type === 'bet') {
+        s.wallets.add(r.user.toLowerCase()); // players: wallets that placed a bet
         s.betsCount++;
         if (r.side === 'UP') s.riseIn += r.amount; else s.fallIn += r.amount;
       } else if (r.type === 'win') s.wins += r.amount;
