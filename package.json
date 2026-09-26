@@ -23,6 +23,7 @@
     "test:fuzz": "node test/invariant_fuzz.test.js",
     "transfer-owner": "node --env-file-if-exists=.env scripts/transfer_owner.js",
     "test:challenge": "node --env-file-if-exists=.env scripts/challenge_test.js",
+    "test:rounds": "node --env-file-if-exists=.env scripts/rounds_test.js",
     "test:wallets": "node --env-file-if-exists=.env scripts/multi_wallet_test.js"
   },
   "devDependencies": {

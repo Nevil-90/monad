@@ -142,7 +142,8 @@ npm run retire -- 0xPREVIOUS_CONTRACT   # after a redeploy: pause the old one (c
 npm run test:all        # compile + app logic + EVM integration + security regressions
 npm run test:mutation   # re-injects each fixed bug; every one must be caught
 npm run test:fuzz       # random actions by players, keepers and owner; solvency and exact payouts after every step
-npm run test:wallets    # testnet, keeper running: 5 wallets, 3 markets, payouts to the wei
+npm run test:wallets    # testnet, keeper running: 8 wallets on both sides, 3 markets, payouts to the wei
+npm run test:rounds     # testnet, keeper running: 7 bets in one block; 3 rounds in a row claimed in one transaction
 npm run test:challenge  # testnet, keeper stopped: late reports replaced by the keeper
 ```
 
