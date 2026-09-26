@@ -33,6 +33,7 @@ export class PulseFeed {
         side: round?.winningSide ?? null,
         market: h.marketLabel(r.marketId),
         amount: r.amount,
+        time: h.blockTimes.get(r.block) ?? null, // ms, from the block the claim landed in
         mult: stake ? r.amount / stake : null
       };
     });

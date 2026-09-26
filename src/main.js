@@ -1016,18 +1016,29 @@ export function startApp() {
           </li>`;
       }).join('');
     }
-    tickerItems = feed.slice(0, 5);
+    tickerFeed = feed;
     paintTicker();
   }
 
+  // Narrow screens show the Pulse feed as one line: only wins from the last few minutes, so an old win
+  // is never presented as news; it rotates only when there is more than one
+  const TICKER_RECENT_MS = 10 * 60e3;
+  let tickerFeed = [];
+  let tickerShown = null;
   function paintTicker() {
     const ticker = $('pulse-ticker');
+    tickerItems = tickerFeed.filter((w) => w.time !== null && Date.now() - w.time < TICKER_RECENT_MS).slice(0, 5);
     const show = window.innerWidth <= 1100 && tickerItems.length > 0;
     const changed = ticker.classList.contains('hidden') === show;
     ticker.classList.toggle('hidden', !show);
     if (changed) requestAnimationFrame(updateSafeArea);
-    if (!show) return;
+    if (!show) {
+      tickerShown = null;
+      return;
+    }
     const item = tickerItems[tickerIndex % tickerItems.length];
+    if (item.key === tickerShown) return; // same win: no re-render, no animation
+    tickerShown = item.key;
     const side = item.side === 'UP' ? 'up' : item.side === 'DOWN' ? 'down' : '';
     const who = item.you ? 'You' : item.user;
     ticker.innerHTML = `<span class="${side}">${item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span> ${escapeHtml(who)} won ${fmtMon(item.amount)} MON on ${escapeHtml(item.market)}`;
@@ -1036,8 +1047,8 @@ export function startApp() {
     ticker.style.animation = '';
   }
   setInterval(() => {
-    if (!tickerItems.length) return;
-    tickerIndex = (tickerIndex + 1) % tickerItems.length;
+    // Local timer: rotates between recent wins and drops ones that get old (no network)
+    if (tickerItems.length > 1) tickerIndex = (tickerIndex + 1) % tickerItems.length;
     paintTicker();
   }, 4000);
   window.addEventListener('resize', paintTicker);

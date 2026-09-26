@@ -129,7 +129,7 @@ export default function AppShell() {
           </section>
 
           {/* Mobile: rotating latest win */}
-          <div className="pulse-ticker hidden" id="pulse-ticker" role="status"></div>
+          <div className="pulse-ticker hidden" id="pulse-ticker" aria-live="off"></div>
 
           {/* Live position status */}
           <div className="position-chip hidden" id="position-chip" role="status">
