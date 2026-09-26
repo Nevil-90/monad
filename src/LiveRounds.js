@@ -6,7 +6,11 @@
  * market (a bet, lock, settlement, new round). Phases between events (betting closes, close time)
  * follow from the round's own timestamps and the local clock (tick()).
  *
- * Round phases, all from the contract's own timestamps:
+ * Continuous play: the next round opens (with the next bet) as soon as the current one stops taking
+ * bets, while the current one still locks, runs and settles. The state therefore has two parts: the
+ * round you can bet on (derive(): 'open' or 'next') and the running round ('live').
+ *
+ * A round's own phases, from the contract's timestamps:
  *   open      bets accepted until betCloseTimestamp
  *   closed    betting over, waiting for the lock report (strike) at lockTimestamp
  *   locked    strike set, the round runs until closeTimestamp
@@ -41,6 +45,7 @@ export class LiveRounds {
     this.onRoundEnd = onRoundEnd;
     this.onRoundConfirmed = onRoundConfirmed;
     this.early = null; // { key, winner } result read from the signed close report, before settlement
+    this.announced = new Set(); // `${marketId}:${roundId}` results already shown
     this.state = null;        // current round of the active market
     this.watched = new Map(); // `${marketId}:${roundId}` rounds shown live, to announce their result
     this.feeRates = new Map(); // `${marketId}:${roundId}` -> snapshotted fee bps, read from the round
@@ -60,13 +65,13 @@ export class LiveRounds {
    * later; the UI marks the result as confirming until that RoundSettled event arrives.
    */
   scheduleEarlyResult() {
-    const st = this.state;
-    const r = this.raw;
-    if (!API_CONFIG.priceRelayUrl || !st || !r || st.phase !== 'settling' || !(r.lockPrice > 0n)) return;
-    const key = `${st.marketId.toLowerCase()}:${st.roundId}`;
+    const live = this.state?.live;
+    const r = this.liveRaw;
+    if (!API_CONFIG.priceRelayUrl || !live || !r || live.phase !== 'settling' || !(r.lockPrice > 0n)) return;
+    const key = `${this.state.marketId.toLowerCase()}:${live.roundId}`;
     if (this.earlyFor === key) return;
     this.earlyFor = key;
-    const market = SUPPORTED_MARKETS[st.marketKey];
+    const market = SUPPORTED_MARKETS[this.state.marketKey];
     const closeTs = Math.ceil(r.closeTimestamp / r.priceWindow) * r.priceWindow;
     for (const delay of EARLY_RESULT_AT_MS) {
       setTimeout(() => this.tryEarlyResult(key, market, closeTs, r), Math.max(0, closeTs * 1000 + delay - Date.now()));
@@ -74,7 +79,7 @@ export class LiveRounds {
   }
 
   async tryEarlyResult(key, market, closeTs, r) {
-    if (this.early?.key === key || this.announced === key || this.state?.roundId !== r.roundId) return;
+    if (this.early?.key === key || this.announced.has(key) || this.state?.marketId?.toLowerCase() !== key.split(':')[0]) return;
     try {
       const signers = await this.oracleSet();
       const res = await fetch(`${API_CONFIG.priceRelayUrl}/reports?feed=${market.feed}&ts=${closeTs}`, { signal: AbortSignal.timeout(4000) });
@@ -91,12 +96,12 @@ export class LiveRounds {
         values.push(units);
       }
       if (values.length < signers.threshold) return;
-      if (this.early?.key === key || this.announced === key) return;
+      if (this.early?.key === key || this.announced.has(key)) return;
       const close = medianUnits(values);
       const strike = r.lockPrice / 10n ** 28n; // the contract stores 8-decimal values scaled to 36 decimals
       const winner = close === strike ? 'REFUND' : close > strike ? 'UP' : 'DOWN';
       this.early = { key, winner };
-      this.announced = key;
+      this.announced.add(key);
       this.onRoundEnd?.({
         marketKey: this.state.marketKey,
         roundId: r.roundId,
@@ -129,37 +134,35 @@ export class LiveRounds {
   }
 
   /**
-   * Announces the watched round's result the moment its RoundSettled / RoundCancelled event is
-   * pushed, from the event's own data (close price, winner), without waiting for contract reads.
+   * Announces the result of the round shown running the moment its RoundSettled / RoundCancelled event
+   * is pushed, from the event's own data (close price, winner), without waiting for contract reads.
    */
   announceFromEvents() {
     const st = this.state;
-    if (!st || st.error || st.phase === 'idle' || !(st.poolUp + st.poolDown > 0)) return;
-    const key = `${st.marketId.toLowerCase()}:${st.roundId}`;
+    const liveId = st?.live?.roundId ?? this.lastLiveId;
+    if (!st || st.error || !liveId) return;
+    const key = `${st.marketId.toLowerCase()}:${liveId}`;
     const h = this.history?.rounds.get(key);
-    if (!h || (h.status !== 'settled' && h.status !== 'cancelled')) return;
+    if (!h || (h.status !== 'settled' && h.status !== 'cancelled') || !(h.up > 0 && h.down > 0)) return;
     const chainWinner = h.status === 'settled' ? h.winningSide : 'REFUND';
     if (this.early?.key === key) {
       // Shown early from the signed report; the chain has now settled it
-      this.onRoundConfirmed?.({ marketKey: st.marketKey, roundId: st.roundId, winner: chainWinner, matches: chainWinner === this.early.winner, closePrice: h.closePrice ?? null, lockPrice: h.lockPrice ?? st.lockPrice });
+      this.onRoundConfirmed?.({ marketKey: st.marketKey, roundId: liveId, winner: chainWinner, matches: chainWinner === this.early.winner, closePrice: h.closePrice ?? null, lockPrice: h.lockPrice ?? null });
       this.early = { ...this.early, key: `${key}:confirmed` };
       return;
     }
-    if (this.announced === key) return;
-    this.announced = key;
-    this.onRoundEnd?.({
-      marketKey: st.marketKey,
-      roundId: st.roundId,
-      winner: h.status === 'settled' ? h.winningSide : 'REFUND',
-      lockPrice: h.lockPrice ?? st.lockPrice,
-      closePrice: h.closePrice ?? null
-    });
+    if (this.announced.has(key)) return;
+    this.announced.add(key);
+    this.onRoundEnd?.({ marketKey: st.marketKey, roundId: liveId, winner: chainWinner, lockPrice: h.lockPrice ?? null, closePrice: h.closePrice ?? null });
   }
 
   start(marketKey) {
     this.marketKey = marketKey;
     this.state = null;
     this.raw = null;
+    this.prevRaw = null;
+    this.liveRaw = null;
+    this.lastLiveId = null;
     this.syncing = false;
     this.again = false;
     clearTimeout(this.retry);
@@ -172,7 +175,7 @@ export class LiveRounds {
     this.raw = null;
   }
 
-  /** Round phase at `now` (seconds) from the contract's timestamps */
+  /** A round's own phase at `now` (seconds), from the contract's timestamps */
   static phaseOf(r, now) {
     const oneSided = r.totalUp === 0n || r.totalDown === 0n;
     const expired = (r.status === 1 || r.status === 2) && !oneSided && now > r.expiryTimestamp;
@@ -186,15 +189,67 @@ export class LiveRounds {
     return { phase: 'ended', expired };
   }
 
-  /** Moves the phase forward with the clock between events; reads nothing */
+  /**
+   * What the app shows, from the current round and the one before it (continuous play):
+   *   - the round you can bet on: the current one while it takes bets ('open'); otherwise the next
+   *     one, which your bet opens ('next')
+   *   - the running round ('live'): the latest contested round that no longer takes bets and is not
+   *     resolved yet (locking, running, settling); its strike and result time are on the chart
+   */
+  static derive(cur, prev, now) {
+    const bettable = cur.status === 1 && now <= cur.betCloseTimestamp;
+    let liveRaw = null;
+    for (const r of [cur, prev]) {
+      if (!r) continue;
+      const contested = r.totalUp > 0n && r.totalDown > 0n;
+      if (contested && (r.status === 1 || r.status === 2) && now > r.betCloseTimestamp) { liveRaw = r; break; }
+    }
+    const live = liveRaw ? (() => {
+      const { phase, expired } = LiveRounds.phaseOf(liveRaw, now);
+      return {
+        roundId: liveRaw.roundId, phase, expired,
+        lockAt: liveRaw.lockTimestamp * 1000, closeAt: liveRaw.closeTimestamp * 1000, finalizeAt: liveRaw.finalizeAfter * 1000,
+        lockPrice: toPrice(liveRaw.lockPrice), poolUp: toMon(liveRaw.totalUp), poolDown: toMon(liveRaw.totalDown)
+      };
+    })() : null;
+    return {
+      phase: bettable ? 'open' : 'next',
+      roundId: bettable ? cur.roundId : cur.roundId + 1, // the round a bet goes into
+      currentRoundId: cur.roundId,
+      startAt: cur.startTimestamp * 1000,
+      betCloseAt: cur.betCloseTimestamp * 1000,
+      lockAt: cur.lockTimestamp * 1000,
+      closeAt: cur.closeTimestamp * 1000,
+      poolUp: bettable ? toMon(cur.totalUp) : 0,
+      poolDown: bettable ? toMon(cur.totalDown) : 0,
+      upBettors: bettable ? cur.upBettors : 0,
+      downBettors: bettable ? cur.downBettors : 0,
+      feeBps: bettable ? cur.feeBps : null,
+      closedBetting: !bettable,
+      // The strike line is the running round's; a round still taking bets has none yet
+      lockPrice: live ? live.lockPrice : null,
+      expired: Boolean(live?.expired),
+      live,
+      liveRaw
+    };
+  }
+
+  apply(now) {
+    const d = LiveRounds.derive(this.raw, this.prevRaw, now);
+    this.liveRaw = d.liveRaw;
+    delete d.liveRaw;
+    if (d.live) this.lastLiveId = d.live.roundId;
+    return d;
+  }
+
+  /** Moves phases forward with the clock between events; reads nothing */
   tick() {
     if (!this.raw || !this.state || this.state.error) return;
-    const now = Date.now() / 1000;
-    const { phase, expired } = LiveRounds.phaseOf(this.raw, now);
-    const closedBetting = now > this.raw.betCloseTimestamp;
-    if (phase === this.state.phase && closedBetting === this.state.closedBetting) return;
-    this.state = { ...this.state, phase, expired, closedBetting };
-    if (phase === 'settling') this.scheduleEarlyResult();
+    const before = this.state;
+    const d = this.apply(Date.now() / 1000);
+    if (d.phase === before.phase && d.live?.phase === before.live?.phase && d.live?.roundId === before.live?.roundId) return;
+    this.state = { ...before, ...d };
+    if (d.live?.phase === 'settling') this.scheduleEarlyResult();
     this.onUpdate?.(this.state);
   }
 
@@ -209,49 +264,33 @@ export class LiveRounds {
       const market = SUPPORTED_MARKETS[key];
       const m = await this.web3.fetchOnChainMarket(market.marketId);
       if (!m) throw new Error('Could not read the market from the contract.');
-      const r = await this.web3.fetchOnChainRound(market.marketId, m.currentRoundId);
+      const cur = Number(m.currentRoundId);
+      const [r, prev] = await Promise.all([
+        this.web3.fetchOnChainRound(market.marketId, cur),
+        cur > 1 ? this.web3.fetchOnChainRound(market.marketId, cur - 1) : Promise.resolve(null)
+      ]);
       if (!r) throw new Error('Could not read the current round from the contract.');
       if (key !== this.marketKey) return; // market switched while reading
-
-      const now = Date.now() / 1000;
-      const { phase, expired } = LiveRounds.phaseOf(r, now);
       this.raw = r;
+      this.prevRaw = prev;
+      const shownLive = this.state?.marketId === market.marketId ? this.state.live?.roundId : null;
+      this.state = { marketKey: key, marketId: market.marketId, error: null, ...this.apply(Date.now() / 1000) };
 
-      const prev = this.state;
-      this.state = {
-        marketKey: key,
-        marketId: market.marketId,
-        roundId: r.roundId,
-        status: r.status,
-        phase,
-        betCloseAt: r.betCloseTimestamp * 1000,
-        lockAt: r.lockTimestamp * 1000,
-        closeAt: r.closeTimestamp * 1000,
-        finalizeAt: r.finalizeAfter * 1000,
-        expired,
-        lockPrice: toPrice(r.lockPrice),
-        poolUp: toMon(r.totalUp),
-        poolDown: toMon(r.totalDown),
-        upBettors: r.upBettors,
-        downBettors: r.downBettors,
-        feeBps: r.feeBps,
-        closedBetting: now > r.betCloseTimestamp,
-        error: null
-      };
-
-      // A round we showed has moved on: read how it ended and announce it
-      const prevKey = prev ? `${prev.marketId?.toLowerCase()}:${prev.roundId}` : null;
-      if (prev && prev.marketId === market.marketId && prev.roundId !== r.roundId && prev.phase !== 'idle' && this.announced !== prevKey) {
-        this.announced = prevKey;
-        const ended = await this.web3.fetchOnChainRound(market.marketId, prev.roundId);
-        if (ended && (ended.status === 3 || ended.status === 4) && ended.totalPool > 0n) {
-          this.onRoundEnd?.({
-            marketKey: key,
-            roundId: ended.roundId,
-            winner: ended.status === 3 ? (ended.winningSide === 1 ? 'UP' : 'DOWN') : 'REFUND',
-            lockPrice: toPrice(ended.lockPrice),
-            closePrice: toPrice(ended.closePrice)
-          });
+      // The round we showed running has left the view: announce how it ended if no event did
+      if (shownLive && shownLive !== this.state.live?.roundId) {
+        const k = `${market.marketId.toLowerCase()}:${shownLive}`;
+        if (!this.announced.has(k) && this.early?.key !== k) {
+          const ended = await this.web3.fetchOnChainRound(market.marketId, shownLive);
+          if (ended && (ended.status === 3 || ended.status === 4) && ended.totalUp > 0n && ended.totalDown > 0n && !this.announced.has(k)) {
+            this.announced.add(k);
+            this.onRoundEnd?.({
+              marketKey: key,
+              roundId: ended.roundId,
+              winner: ended.status === 3 ? (ended.winningSide === 1 ? 'UP' : 'DOWN') : 'REFUND',
+              lockPrice: toPrice(ended.lockPrice),
+              closePrice: toPrice(ended.closePrice)
+            });
+          }
         }
       }
     } catch (err) {
@@ -264,7 +303,7 @@ export class LiveRounds {
     }
     if (key === this.marketKey) {
       this.onUpdate?.(this.state);
-      if (this.state?.phase === 'settling') this.scheduleEarlyResult();
+      if (this.state?.live?.phase === 'settling') this.scheduleEarlyResult();
     }
     if (this.again) {
       this.again = false;
@@ -319,9 +358,9 @@ export class LiveRounds {
       const cur = this.state && this.state.marketId?.toLowerCase() === p.marketId ? this.state : null;
       const bettingClosed = !cur || p.roundId < cur.roundId || (p.roundId === cur.roundId && cur.closedBetting);
       const oneSided = round && (round.up === 0 || round.down === 0);
-      // Only the current round can be unresolved (a market moves on after settle/cancel), so its
+      // A contested round unresolved past its expiry is refundable (SEC-29): the running round's
       // contract read says whether it expired
-      const expired = cur && p.roundId === cur.roundId && cur.expired;
+      const expired = Boolean(cur?.live && p.roundId === cur.live.roundId && cur.live.expired);
       if (round?.status === 'cancelled' || (!round?.status && ((oneSided && bettingClosed) || expired))) {
         status = 'Refunded';
         payout = p.amount;

@@ -1,6 +1,7 @@
 /**
  * scripts/sync_markets.js
- * Makes the deployed contract's markets match src/config.js (SUPPORTED_MARKETS):
+ * Makes the deployed contract match src/config.js:
+ *   - round timing (ROUND_RULES: betting window, cutoff before the strike); applies to new rounds only
  *   - creates any configured market that does not exist yet, and marks it verified
  *   - deactivates every other active market (e.g. after changing a round length, which gives a market
  *     a new id). A deactivated market's current round still locks, settles and pays out; it just
@@ -10,7 +11,7 @@
  */
 
 import { ethers } from 'ethers';
-import { getConfig, SUPPORTED_MARKETS } from '../src/config.js';
+import { getConfig, SUPPORTED_MARKETS, ROUND_RULES } from '../src/config.js';
 import { AMM_ABI } from '../src/contracts/AMMAbi.js';
 import { MonadRpcProvider } from '../src/rpc.js';
 import { feedIdBytes32 } from '../src/oracle.js';
@@ -34,6 +35,15 @@ const send = async (label, method, ...args) => {
   console.log(`  [OK] ${label} (tx ${rc.hash})`);
 };
 
+// Round timing
+if ((await amm.bettingWindowSeconds()) !== BigInt(ROUND_RULES.bettingWindow)) {
+  await send(`Betting window ${ROUND_RULES.bettingWindow} s`, 'setBettingWindow', ROUND_RULES.bettingWindow);
+}
+const [lockBuffer, priceWindow, timeout, minBet] = await Promise.all([amm.lockBufferSeconds(), amm.priceWindowSeconds(), amm.emergencyTimeout(), amm.minBet()]);
+if (lockBuffer !== BigInt(ROUND_RULES.lockBuffer)) {
+  await send(`Betting closes ${ROUND_RULES.lockBuffer} s before the strike`, 'setProtocolParameters', ROUND_RULES.lockBuffer, priceWindow, timeout, minBet);
+}
+
 const wanted = new Set();
 for (const m of Object.values(SUPPORTED_MARKETS)) {
   const id = ethers.solidityPackedKeccak256(['bytes32', 'string', 'uint256'], [feedIdBytes32(m.feed), m.symbol, m.roundDuration]);
@@ -55,4 +65,4 @@ for (let i = 0; i < count; i++) {
   const m = await amm.markets(id);
   if (m.active) await send(`${m.symbol} ${m.roundDuration}s market deactivated (not in src/config.js)`, 'setMarketActive', id, false);
 }
-console.log('Markets match src/config.js.');
+console.log('Contract matches src/config.js.');

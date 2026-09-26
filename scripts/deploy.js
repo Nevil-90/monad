@@ -17,7 +17,7 @@ import { ethers } from 'ethers';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ENVIRONMENTS, SUPPORTED_MARKETS, TYPICAL_GAS } from '../src/config.js';
+import { ENVIRONMENTS, SUPPORTED_MARKETS, TYPICAL_GAS, ROUND_RULES } from '../src/config.js';
 import { REDSTONE_PRIMARY_SIGNERS, feedIdBytes32, fetchLatestReports, fetchReportsAt } from '../src/oracle.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -147,9 +147,11 @@ async function deploy() {
 
   const gasPrice = (await provider.getFeeData()).gasPrice;
   const minBet = minBetFor(gasPrice);
-  const [lockBuffer, priceWindow, timeout] = await Promise.all([contract.lockBufferSeconds(), contract.priceWindowSeconds(), contract.emergencyTimeout()]);
-  await (await contract.setProtocolParameters(lockBuffer, priceWindow, timeout, minBet)).wait();
+  const [priceWindow, timeout] = await Promise.all([contract.priceWindowSeconds(), contract.emergencyTimeout()]);
+  await (await contract.setProtocolParameters(ROUND_RULES.lockBuffer, priceWindow, timeout, minBet)).wait();
+  await (await contract.setBettingWindow(ROUND_RULES.bettingWindow)).wait();
   console.log(`    [OK] minBet ${ethers.formatEther(minBet)} MON at ${ethers.formatUnits(gasPrice, 'gwei')} gwei (SEC-11)`);
+  console.log(`    [OK] Rounds: betting ${ROUND_RULES.bettingWindow} s, closes ${ROUND_RULES.lockBuffer} s before the strike`);
 
   console.log('\n[6] Initializing Canonical Multi-Markets On-Chain...');
   for (const [key, m] of Object.entries(SUPPORTED_MARKETS)) {

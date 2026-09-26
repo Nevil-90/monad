@@ -118,9 +118,16 @@ export const TYPICAL_GAS = {
 
 // Markets. `feed` is the RedStone data feed id the contract verifies reports for;
 // marketId = keccak256(abi.encodePacked(bytes32(feed), symbol, roundDuration)).
+// Round timing, applied to the contract by npm run deploy and npm run markets (no redeploy needed to
+// retune). A first bet opens a round; its strike is the first 10 s report mark at least
+// bettingWindow seconds later, betting closes lockBuffer seconds before the strike, and the result
+// is roundDuration seconds after the strike. The next round opens with the next bet as soon as this
+// one stops taking bets (continuous play).
+export const ROUND_RULES = { bettingWindow: 10, lockBuffer: 5 };
+
 export const SUPPORTED_MARKETS = {
   BTC: {
-    marketId: '0x59294bc06269f63b60b63ee06667680628d5671d515196bc7074fe72e621fc1a',
+    marketId: '0x3f2c6b072f0d9130d909f43afc36353b37725d468aa5ba558e74e348d02a6476',
     symbol: 'BTC/USD',
     name: 'Bitcoin',
     feed: 'BTC',
@@ -128,14 +135,14 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'btcusdt@ticker',
     binanceTradeStream: 'btcusdt@trade',
     decimals: 2,
-    roundDuration: 30,
+    roundDuration: 20,
     minBet: 0.1,
     maxBet: 5000.0,
     icon: '₿',
     accentColor: '#f7931a'
   },
   ETH: {
-    marketId: '0x136f06ff19094248bad10faa0a5a77934229a8919cb38ea96a2553208a185ed5',
+    marketId: '0x673949a04694203f6ab1c2f92b6e818d17797544bf0d4b5f53241b46ac8af479',
     symbol: 'ETH/USD',
     name: 'Ethereum',
     feed: 'ETH',
@@ -143,14 +150,14 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'ethusdt@ticker',
     binanceTradeStream: 'ethusdt@trade',
     decimals: 2,
-    roundDuration: 30,
+    roundDuration: 20,
     minBet: 0.1,
     maxBet: 5000.0,
     icon: 'Ξ',
     accentColor: '#627eea'
   },
   SOL: {
-    marketId: '0x4b635dc0844531fe1e553dc9fc420ba762844708cb36820ae0eff7fbf0df7b08',
+    marketId: '0x1b8f7cb08526b69e6101b3861e8964b87f383476f8c3a79598a4be5b72370f16',
     symbol: 'SOL/USD',
     name: 'Solana',
     feed: 'SOL',
@@ -158,14 +165,14 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'solusdt@ticker',
     binanceTradeStream: 'solusdt@trade',
     decimals: 2,
-    roundDuration: 30,
+    roundDuration: 20,
     minBet: 0.1,
     maxBet: 5000.0,
     icon: '◎',
     accentColor: '#14f195'
   },
   MON: {
-    marketId: '0x113c7cb008694d03e98bd99015925fa7918673291f92169097a9a8eac1c5e3f1',
+    marketId: '0x359a04e86f6643cb63069b9583e50feef723bc85296daeefbe576ef91a10e206',
     symbol: 'MON/USD',
     name: 'Monad Native',
     feed: 'MON',
@@ -173,7 +180,7 @@ export const SUPPORTED_MARKETS = {
     binanceStream: null,
     binanceTradeStream: null,
     decimals: 4,
-    roundDuration: 30,
+    roundDuration: 20,
     minBet: 1.0,
     maxBet: 25000.0,
     icon: 'M',

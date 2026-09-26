@@ -153,12 +153,14 @@ export function startApp() {
   // Wallet
   // ---------------------------------------------------------------------------
   const web3 = new Web3Manager({
-    connected: ({ account, balance }) => {
+    connected: ({ account, balance, wallet, networkError, silent }) => {
       el.walletLabel.textContent = shortAddr(account);
       el.walletBtn.classList.add('connected');
+      el.walletBtn.classList.toggle('wrong-network', Boolean(networkError));
       el.balance.textContent = balance ?? '—';
       dashboard?.render();
-      toast('Wallet connected', `${shortAddr(account)} on ${getConfig().name}`);
+      if (networkError) toast('Wrong network', networkError, { error: true });
+      else if (!silent) toast('Wallet connected', `${wallet?.name ? `${wallet.name} · ` : ''}${shortAddr(account)} on ${getConfig().name}`);
       liveRounds?.sync();
       pulse?.refresh();
       renderLedger();
@@ -186,6 +188,14 @@ export function startApp() {
       pulse?.refresh();
       renderLedger();
     },
+    walletsChanged: () => {
+      if (!$('wallet-modal').classList.contains('hidden') && !web3.account && !walletBusy) renderWalletPicker();
+    },
+    networkChanged: ({ isMonad }) => {
+      el.walletBtn.classList.toggle('wrong-network', !isMonad);
+      if (!isMonad) toast('Wrong network', `Your wallet left ${getConfig().name}. Switch back to bet (you can keep watching).`, { error: true });
+      else toast('Network OK', `Back on ${getConfig().name}.`);
+    },
     disconnected: () => {
       el.walletLabel.textContent = 'Connect';
       el.walletBtn.classList.remove('connected');
@@ -202,37 +212,107 @@ export function startApp() {
     return Number.isFinite(b) ? b : null;
   }
 
-  el.walletBtn.addEventListener('click', async () => {
-    if (!web3.account) {
-      const res = await web3.connect();
-      if (!res.success) openWalletModal(res.error);
-      return;
-    }
-    openWalletModal();
+  el.walletBtn.addEventListener('click', () => {
+    if (!web3.account) openWalletPicker();
+    else openWalletModal();
   });
 
-  function openWalletModal(error = null) {
+  // Wallet chooser: our own modal listing every installed wallet (EIP-6963), so no extension opens
+  // its own chooser window. The chosen wallet still shows its own approval prompt; that is the
+  // wallet's security step.
+  let walletBusy = false;
+  const INSTALL_LINKS = [
+    ['MetaMask', 'https://metamask.io/download/'],
+    ['Rabby', 'https://rabby.io/'],
+    ['Phantom', 'https://phantom.com/download']
+  ];
+  const safeIcon = (icon) => (typeof icon === 'string' && /^data:image\/(png|svg\+xml|webp|jpeg);/.test(icon) ? icon : null);
+
+  function openWalletPicker(message = null) {
+    renderWalletPicker(message);
+    openModal('wallet-modal');
+  }
+
+  function renderWalletPicker(message = null, tone = 'error') {
+    $('wallet-modal-title').textContent = 'Connect a wallet';
+    const body = $('wallet-modal-body');
+    const wallets = web3.walletList();
+    const note = message ? `<p class="wallet-note ${tone}" role="alert">${escapeHtml(message)}</p>` : '';
+    if (!wallets.length) {
+      body.innerHTML = `${note}
+        <p class="modal-text">No wallet found in this browser. Install one of these, reload the page, and connect. You can watch rounds without a wallet.</p>
+        <div class="wallet-list">${INSTALL_LINKS.map(([name, url]) => `<a class="wallet-item" href="${url}" target="_blank" rel="noopener"><span class="wallet-icon">${escapeHtml(name[0])}</span><span class="wallet-name">${escapeHtml(name)}</span><span class="wallet-tag">Install ↗</span></a>`).join('')}</div>`;
+      return;
+    }
+    body.innerHTML = `${note}
+      <p class="modal-text">Choose a wallet. You'll approve the connection in the wallet, and it will be asked to use ${escapeHtml(getConfig().name)}.</p>
+      <div class="wallet-list">${wallets.map((w) => {
+        const icon = safeIcon(w.info.icon);
+        return `<button class="wallet-item" data-wallet="${escapeHtml(w.info.uuid)}">
+          ${icon ? `<img class="wallet-icon" src="${icon}" alt="" width="28" height="28" />` : `<span class="wallet-icon">${escapeHtml((w.info.name || '?')[0])}</span>`}
+          <span class="wallet-name">${escapeHtml(w.info.name || 'Browser wallet')}</span>
+          <span class="wallet-tag">Detected</span>
+        </button>`;
+      }).join('')}</div>`;
+    body.querySelectorAll('[data-wallet]').forEach((btn) => btn.addEventListener('click', () => pickWallet(btn.dataset.wallet)));
+  }
+
+  async function pickWallet(uuid) {
+    walletBusy = true;
+    const body = $('wallet-modal-body');
+    body.querySelectorAll('[data-wallet]').forEach((b) => { b.disabled = true; b.classList.toggle('pending', b.dataset.wallet === uuid); });
+    body.querySelector(`[data-wallet="${CSS.escape(uuid)}"] .wallet-tag`).textContent = 'Approve in wallet…';
+    const res = await web3.connect(uuid);
+    walletBusy = false;
+    if (!res.success) return renderWalletPicker(res.error);
+    if (res.networkError) return renderNetworkProblem(res.networkError);
+    closeModal('wallet-modal');
+  }
+
+  /** Connected, but the wallet is on another network: explain, offer the switch, allow watching */
+  function renderNetworkProblem(message) {
+    $('wallet-modal-title').textContent = 'Wrong network';
+    const cfg = getConfig();
+    $('wallet-modal-body').innerHTML = `
+      <p class="wallet-note error" role="alert">${escapeHtml(message)}</p>
+      <p class="modal-text">Bets and claims only go to ${escapeHtml(cfg.name)} (chain ${cfg.chainId}). You can keep watching meanwhile.</p>
+      <div class="modal-actions">
+        <button class="ghost-btn" data-close="wallet-modal">Keep watching</button>
+        <button class="solid-btn" id="wallet-switch">Switch to ${escapeHtml(cfg.name)}</button>
+      </div>`;
+    $('wallet-switch').addEventListener('click', async () => {
+      const r = await web3.switchToMonad();
+      if (r.ok) {
+        el.walletBtn.classList.remove('wrong-network');
+        closeModal('wallet-modal');
+        toast('Network OK', `Now on ${cfg.name}.`);
+      } else {
+        renderNetworkProblem(r.error);
+      }
+    });
+  }
+
+  function openWalletModal() {
     const body = $('wallet-modal-body');
     const cfg = getConfig();
-    if (error || !web3.account) {
-      body.innerHTML = `
-        <p class="modal-text">${escapeHtml(error || 'No browser wallet found.')}</p>
-        <p class="modal-text">Install an EVM wallet such as MetaMask or Rabby, add ${escapeHtml(cfg.name)}, then connect again. You can watch rounds without a wallet.</p>
-        <div class="modal-actions"><button class="solid-btn" data-close="wallet-modal">Got it</button></div>`;
-    } else {
-      body.innerHTML = `
-        <div class="modal-kv"><span>Address</span><span class="num">${escapeHtml(shortAddr(web3.account))}</span></div>
-        <div class="modal-kv"><span>Network</span><span>${escapeHtml(cfg.name)}</span></div>
-        <div class="modal-kv"><span>Balance</span><span class="num">${escapeHtml(web3.balance ?? '—')} MON</span></div>
-        <div class="modal-actions">
-          <a class="ghost-btn" href="${escapeHtml(`${cfg.explorerUrl}/address/${web3.account}`)}" target="_blank" rel="noopener">Explorer ↗</a>
-          <button class="solid-btn" id="wallet-disconnect">Disconnect</button>
-        </div>`;
-      $('wallet-disconnect').addEventListener('click', () => {
-        web3.disconnect();
-        closeModal('wallet-modal');
-      });
+    if (!web3.isLiveNetwork) {
+      renderNetworkProblem(`${web3.walletInfo?.name || 'Your wallet'} is not on ${cfg.name}.`);
+      openModal('wallet-modal');
+      return;
     }
+    $('wallet-modal-title').textContent = web3.walletInfo?.name || 'Wallet';
+    body.innerHTML = `
+      <div class="modal-kv"><span>Address</span><span class="num">${escapeHtml(shortAddr(web3.account))}</span></div>
+      <div class="modal-kv"><span>Network</span><span>${escapeHtml(cfg.name)}</span></div>
+      <div class="modal-kv"><span>Balance</span><span class="num">${escapeHtml(web3.balance ?? '—')} MON</span></div>
+      <div class="modal-actions">
+        <a class="ghost-btn" href="${escapeHtml(`${cfg.explorerUrl}/address/${web3.account}`)}" target="_blank" rel="noopener">Explorer ↗</a>
+        <button class="solid-btn" id="wallet-disconnect">Disconnect</button>
+      </div>`;
+    $('wallet-disconnect').addEventListener('click', () => {
+      web3.disconnect();
+      closeModal('wallet-modal');
+    });
     openModal('wallet-modal');
   }
 
@@ -258,7 +338,7 @@ export function startApp() {
       }
     }
     if (p?.lockBufferSeconds !== undefined && p?.priceWindowSeconds !== undefined) {
-      roundRules = { lockBuffer: p.lockBufferSeconds, priceWindow: p.priceWindowSeconds };
+      roundRules = { lockBuffer: p.lockBufferSeconds, priceWindow: p.priceWindowSeconds, bettingWindow: p.bettingWindowSeconds ?? 0 };
     }
   }
 
@@ -270,8 +350,10 @@ export function startApp() {
     if (!roundRules) return null;
     const half = Math.floor(duration / 2);
     const w = Math.min(roundRules.priceWindow, half);
-    const lock = Math.ceil((Math.floor(nowMs / 1000) + duration) / w) * w;
-    return { betCloseAt: (lock - Math.min(roundRules.lockBuffer, half)) * 1000, lockAt: lock * 1000, closeAt: (lock + duration) * 1000 };
+    const betting = roundRules.bettingWindow || duration;
+    const lock = Math.ceil((Math.floor(nowMs / 1000) + betting) / w) * w;
+    const buffer = Math.min(roundRules.lockBuffer, half, Math.floor(betting / 2));
+    return { betCloseAt: (lock - buffer) * 1000, lockAt: lock * 1000, closeAt: (lock + duration) * 1000 };
   }
 
   // ---------------------------------------------------------------------------
@@ -469,9 +551,11 @@ export function startApp() {
       }
     } else {
       const st = liveRounds?.state;
-      const toLock = st ? (st.lockAt - Date.now()) / 1000 : null;
+      // The running round's strike if one is about to lock, else the round taking bets
+      const lockAt = st?.live ? st.live.lockAt : st?.lockAt;
+      const toLock = lockAt ? (lockAt - Date.now()) / 1000 : null;
       el.strikeVal.textContent = !st || st.error ? '—'
-        : st.phase === 'idle' ? 'Set after the next bet'
+        : !st.live && st.phase === 'next' ? 'Set after the next bet'
         : toLock > 0 ? `Sets in ${fmtClock(toLock)}` : 'Setting…';
       el.strikeVal.classList.remove('locked');
       el.gapVal.textContent = '—';
@@ -497,7 +581,7 @@ export function startApp() {
       return;
     }
     const mon = (gas) => (Number(gas) * 1.1 * Number(gasPriceWei)) / 1e18;
-    const betFee = mon(st.phase === 'idle' ? TYPICAL_GAS.betNewRound : TYPICAL_GAS.bet);
+    const betFee = mon(st.phase === 'next' || st.phase === 'idle' ? TYPICAL_GAS.betNewRound : TYPICAL_GAS.bet);
     const claimFee = mon(TYPICAL_GAS.claim);
     const share = stake > 0 ? ((betFee + claimFee) / stake) * 100 : null;
     node.classList.remove('hidden');
@@ -598,7 +682,8 @@ export function startApp() {
 
   function activePositionsForMarket() {
     const m = amm.getActiveMarket();
-    return positionsList().filter((p) => p.marketKey === amm.activeMarketKey && p.roundId === m.roundId && p.status === 'Active');
+    // Positions still in play: the round taking bets and the running round (continuous play)
+    return positionsList().filter((p) => p.marketKey === amm.activeMarketKey && (p.roundId === m.roundId || p.roundId === m.liveRoundId) && p.status === 'Active');
   }
 
   function paintPositionChip(market, chartPrice) {
@@ -892,8 +977,13 @@ export function startApp() {
     const m = amm.getActiveMarket();
     if (amount <= 0) return toast('Enter a stake', 'Choose how much MON to put on this round.', { error: true });
     if (!web3.account) {
-      const res = await web3.connect();
-      if (!res.success) return toast('Wallet not connected', res.error || 'Connect a wallet to bet.', { error: true });
+      openWalletPicker();
+      return;
+    }
+    if (!web3.isLiveNetwork) {
+      renderNetworkProblem(`${web3.walletInfo?.name || 'Your wallet'} is not on ${getConfig().name}.`);
+      openModal('wallet-modal');
+      return;
     }
     const balance = currentBalance();
     if (balance !== null && amount > balance) return toast('Stake above balance', `You have ${fmtMon(balance)} MON available.`, { error: true });
@@ -901,7 +991,7 @@ export function startApp() {
     {
       const st = liveRounds?.state;
       if (!st || st.error) return toast('Round not loaded', st?.error || 'Reading the round from Monad…', { error: true });
-      if (st.phase !== 'open' && st.phase !== 'idle') return toast('Bets are closed', 'Wait for the next round to open.', { error: true });
+      if (st.phase !== 'open' && st.phase !== 'next') return toast('Bets are closed', 'Wait a moment for the next round.', { error: true });
       // Slippage guard: revert if, by inclusion, the payout per MON fell more than 5% below what the
       // screen shows after this stake. Only meaningful once the other side has money in it.
       const opposing = side === 'UP' ? st.poolDown : st.poolUp;
@@ -1092,6 +1182,7 @@ export function startApp() {
   const BET_CUTOFF_GUARD_S = 8;
   const LIVE_PHASES = {
     open: { label: 'Betting open', verb: 'closes in', bets: true },
+    next: { label: 'Next round', verb: '', bets: true },
     idle: { label: 'Ready', verb: '', bets: true },
     closed: { label: 'Bets closed', verb: 'strike in', bets: false },
     locked: { label: 'Strike locked', verb: 'settles in', bets: false },
@@ -1114,38 +1205,43 @@ export function startApp() {
     if (st.marketKey !== amm.activeMarketKey) return;
     bootStep('network');
     bootStep('round');
-    const roundChanged = m.roundId !== st.roundId;
+    // The round a bet goes into (current, or the next one a bet opens) and the running round
+    const roundChanged = m.roundId !== st.roundId || m.liveRoundId !== (st.live?.roundId ?? null);
     m.roundId = st.roundId;
+    m.liveRoundId = st.live?.roundId ?? null;
     m.poolUp = st.poolUp;
     m.poolDown = st.poolDown;
     m.upBettors = st.upBettors ?? 0;
     m.downBettors = st.downBettors ?? 0;
     m.lockPrice = st.lockPrice;
     if (st.feeBps) amm.feeBps = st.feeBps;
-    el.roundId.textContent = st.roundId;
+    el.roundId.textContent = st.phase === 'next' ? `${st.roundId} (next)` : st.roundId;
 
-    const ph = LIVE_PHASES[st.phase];
+    const ph = LIVE_PHASES[st.phase] || LIVE_PHASES.ended;
     const now = Date.now();
-    const until = st.phase === 'open' ? st.betCloseAt : st.phase === 'closed' ? st.lockAt : st.phase === 'locked' ? st.closeAt : st.phase === 'confirming' ? st.finalizeAt : null;
-    const left = until ? Math.max(0, (until - now) / 1000) : null;
+    const left = st.phase === 'open' ? Math.max(0, (st.betCloseAt - now) / 1000) : null;
     el.console.classList.toggle('locked', !ph.bets);
     el.console.classList.toggle('closing', st.phase === 'open' && left <= 5);
-    // No bets in the last 8 s: confirming in a wallet takes seconds, and a bet that lands after the
-    // cutoff reverts and still pays the network fee
+    // No bets in the last few seconds: confirming in a wallet takes time, and a bet that lands after
+    // the cutoff reverts and still pays the network fee. The next round opens right after.
     const canBet = ph.bets && !(st.phase === 'open' && left !== null && left <= BET_CUTOFF_GUARD_S);
     el.betUp.disabled = !canBet;
     el.betDown.disabled = !canBet;
     el.phaseLabel.textContent = st.phase === 'open' && left <= 5 ? 'Closing' : ph.label;
-    const preview = st.phase === 'idle' ? projectedRound(m.roundDuration, now) : null;
-    el.phaseTime.innerHTML = st.phase === 'idle'
+    const preview = st.phase === 'next' ? projectedRound(m.roundDuration, now) : null;
+    el.phaseTime.innerHTML = st.phase === 'next'
       ? (preview
         ? `<span class="phase-verb">bet now · strike </span>${fmtClock((preview.lockAt - now) / 1000)}<span class="phase-verb"> · result </span>${fmtClock((preview.closeAt - now) / 1000)}`
-        : '<span class="phase-verb">your bet opens a new round</span>')
+        : '<span class="phase-verb">your bet opens the next round</span>')
       : `<span class="phase-verb">${ph.verb} </span>${left === null ? '' : fmtClock(left)}`;
-    const span = st.phase === 'open' ? (st.betCloseAt - (st.lockAt - m.roundDuration * 1000)) / 1000 : m.roundDuration;
-    el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - (left === null ? 0 : Math.min(1, left / Math.max(1, span))))}`;
+    const span = st.phase === 'open' ? Math.max(1, (st.betCloseAt - st.startAt) / 1000) : 1;
+    el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - (left === null ? 0 : Math.min(1, left / span)))}`;
 
-    engine.setLiveRound(preview ? { ...st, ...preview, phase: 'preview', duration: m.roundDuration } : { ...st, duration: m.roundDuration });
+    // Chart: the running round (its strike line and result countdown); else the round taking bets;
+    // else the round a bet would start
+    if (st.live) engine.setLiveRound({ ...st.live, duration: m.roundDuration });
+    else if (st.phase === 'open') engine.setLiveRound({ ...st, duration: m.roundDuration });
+    else if (preview) engine.setLiveRound({ ...preview, phase: 'preview', duration: m.roundDuration });
     if ((st.lockPrice || null) !== engine.strike) engine.setStrike(st.lockPrice);
     if (roundChanged) engine.setUserPositions([]);
     paintReadout(m, m.price);
@@ -1153,6 +1249,7 @@ export function startApp() {
     paintPositionChip(m, m.price);
     renderLedgerIfChanged();
   }
+
 
   // The countdown and phase move with the local clock between contract events (no network requests)
   setInterval(() => {
@@ -1224,6 +1321,8 @@ export function startApp() {
   }
   loadProtocolParameters();
   history.start();
+  // A wallet connected before reconnects without a prompt (only if it still authorises this site)
+  web3.restoreSession();
   pulse.refresh();
   amm.emit('marketChanged', amm.getActiveMarket());
   renderLedger();

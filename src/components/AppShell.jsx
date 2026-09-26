@@ -351,7 +351,7 @@ export default function AppShell() {
             <ol className="guide">
               <li>
                 <span className="guide-n num">1</span>
-                <div><h3>Pick a side</h3><p>Every round is 30 seconds: betting, then the strike, then the result 30 seconds later. Stake on <b className="rise">Rise</b> if you think the price ends above the strike, or <b className="fall">Fall</b> if below.</p></div>
+                <div><h3>Pick a side</h3><p>Rounds are quick: the strike locks 10–20 s after the round's first bet and the result comes 20 s later. The next round opens as soon as betting closes, so there is always a round to play. Stake on <b className="rise">Rise</b> if you think the price ends above the strike, or <b className="fall">Fall</b> if below.</p></div>
               </li>
               <li>
                 <span className="guide-n num">2</span>

@@ -231,12 +231,9 @@ async function runEvmTests() {
   assert(keeper1Gain === ethers.parseEther('0.011'), 'Keeper 1 withdrew exactly 0.011 MON via claimKeeperRewards()');
 
   // Test 6: Round Chaining & Round #2 Auto-Start
-  console.log('\n--- Step 7: Automatic Round Chaining ---');
+  console.log('\n--- Step 7: Next Round Opened by the Next Bet ---');
   const mAfter = await amm.markets(marketId);
-  assert(mAfter.currentRoundId === 2n, 'Round #2 automatically started upon Round #1 settlement');
-  
-  const r2 = await amm.rounds(marketId, 2);
-  assert(Number(r2.status) === 1, 'Round #2 is open and accepting bets');
+  assert(mAfter.currentRoundId === 1n, 'Settling does not open a round (the next bet does; keeps settlement cheap)');
 
   // Test 7: Winner Claim & Protocol Solvency
   console.log('\n--- Step 8: Winner Payout Claim & Solvency ---');
@@ -293,9 +290,9 @@ async function runEvmTests() {
 
   // Test 9: Signed oracle reports
   console.log('\n--- Step 10: Signed Oracle Reports ---');
-  const r3 = await amm.rounds(marketId, 3);
   await (await amm.connect(user1).betUp(marketId, 3, { value: ethers.parseEther('1') })).wait();
   await (await amm.connect(user2).betDown(marketId, 3, { value: ethers.parseEther('1') })).wait();
+  const r3 = await amm.rounds(marketId, 3);
   const blkNow = await getLatestBlock();
   await increaseTime(Number(r3.lockTimestamp) - blkNow.timestamp + 5);
 
@@ -339,6 +336,55 @@ async function runEvmTests() {
 
   // Round 1 volume was 22 MON, creator fee = 0.1% = 0.022 MON
   assert(creatorBalAfter - creatorBalBefore + creatorGas === ethers.parseEther('0.022'), 'Creator successfully claimed 0.1% royalties (0.022 MON)');
+
+  // Test 12: Continuous play
+  console.log('\n--- Step 12: Continuous Play (next round opens while the current one runs) ---');
+  const failsWith = async (fn, reason) => { try { await fn(); return false; } catch (err) { return `${err.reason || ''} ${err.shortMessage || ''} ${err.message || ''}`.includes(reason); } };
+  await (await amm.connect(owner).setProtocolParameters(5, 10, 600, ethers.parseEther('0.001'))).wait();
+  await (await amm.connect(owner).setBettingWindow(10)).wait();
+  await (await amm.connect(creator).createMarket(btcFeedId, 'Bitcoin', 'BTC/FAST', 20)).wait();
+  const fast = ethers.solidityPackedKeccak256(['bytes32', 'string', 'uint256'], [btcFeedId, 'BTC/FAST', 20]);
+  const f1 = await amm.rounds(fast, 1);
+  const toStrike = Number(f1.lockTimestamp - f1.startTimestamp);
+  assert(Number(f1.lockTimestamp) % 10 === 0 && toStrike >= 10 && toStrike < 20, `Strike ${toStrike} s after the round opens (10-19 s), on the 10 s report grid`);
+  assert(f1.closeTimestamp - f1.lockTimestamp === 20n && f1.lockTimestamp - f1.betCloseTimestamp === 5n, 'Result 20 s after the strike; betting closes 5 s before the strike');
+  await (await amm.connect(user1).betUp(fast, 1, { value: ethers.parseEther('2') })).wait();
+  await (await amm.connect(user2).betDown(fast, 1, { value: ethers.parseEther('1') })).wait();
+  assert(await failsWith(() => amm.connect(user1).betUp.staticCall(fast, 2, { value: ethers.parseEther('1') }), 'Current round still taking bets'),
+    'The next round cannot open while the current one still takes bets');
+  let blk = await getLatestBlock();
+  await increaseTime(Number(f1.betCloseTimestamp) - blk.timestamp + 1);
+  assert(await failsWith(() => amm.connect(user2).betDown.staticCall(fast, 1, { value: ethers.parseEther('1') }), 'Betting window closed'),
+    'A late bet aimed at the closed round is rejected (never moved into another round)');
+  await (await amm.connect(user2).betUp(fast, 2, { value: ethers.parseEther('1') })).wait();
+  await (await amm.connect(user1).betDown(fast, 2, { value: ethers.parseEther('3') })).wait();
+  assert((await amm.markets(fast)).currentRoundId === 2n && Number((await amm.rounds(fast, 1)).status) === 1,
+    'A bet for the next round opens round 2 while round 1 is still running');
+  assert(await failsWith(() => amm.connect(user1).betUp.staticCall(fast, 3, { value: ethers.parseEther('1') }), 'Current round still taking bets'),
+    'Round 3 cannot open while round 2 takes bets');
+  blk = await getLatestBlock();
+  await increaseTime(Number(f1.lockTimestamp) - blk.timestamp + 1);
+  await (await amm.connect(keeper1).lockRoundWithUpdate(fast, 1, reports(6400000000000n, f1.lockTimestamp))).wait();
+  blk = await getLatestBlock();
+  await increaseTime(Number(f1.closeTimestamp) - blk.timestamp + 1);
+  await (await amm.connect(keeper2).settleRoundWithUpdate(fast, 1, reports(6410000000000n, f1.closeTimestamp))).wait();
+  const f1done = await amm.rounds(fast, 1);
+  assert(Number(f1done.status) === 3 && Number(f1done.winningSide) === 1 && (await amm.markets(fast)).currentRoundId === 2n,
+    'Round 1 settles by its id (Rise won) and settling opens no round; round 2 is unaffected');
+  const f2 = await amm.rounds(fast, 2);
+  blk = await getLatestBlock();
+  await increaseTime(Number(f2.lockTimestamp) - blk.timestamp + 1);
+  await (await amm.connect(keeper1).lockRoundWithUpdate(fast, 2, reports(6410000000000n, f2.lockTimestamp))).wait();
+  blk = await getLatestBlock();
+  await increaseTime(Number(f2.closeTimestamp) - blk.timestamp + 1);
+  await (await amm.connect(keeper2).settleRoundWithUpdate(fast, 2, reports(6405000000000n, f2.closeTimestamp))).wait();
+  const f2done = await amm.rounds(fast, 2);
+  const u1Before = await getBalance(user1);
+  const batchRc = await (await amm.connect(user1).claimBatch(fast, [1n, 2n])).wait();
+  const u1Got = (await getBalance(user1)) - u1Before + batchRc.fee;
+  const expected = (ethers.parseEther('2') * f1done.netPayoutPool) / f1done.totalUp + (ethers.parseEther('3') * f2done.netPayoutPool) / f2done.totalDown;
+  assert(Number(f2done.winningSide) === 2 && u1Got === expected, `User 1 won both overlapping rounds and claimed them in one transaction: exactly ${ethers.formatEther(u1Got)} MON`);
+  await (await amm.connect(owner).setBettingWindow(0)).wait();
 
   await ganacheProvider.disconnect();
   await realRedStonePackages();

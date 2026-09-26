@@ -1,8 +1,9 @@
 # MonadPulse
 
-30-second **Rise or Fall** rounds on BTC, ETH, SOL and MON, fully on-chain on Monad.
+Fast **Rise or Fall** rounds on BTC, ETH, SOL and MON, fully on-chain on Monad: the strike locks 10–20 s
+after a round's first bet, the result comes 20 s later, and the next round is open for betting the whole time.
 
-Pick a side before betting closes. The price at lock becomes the strike; 30 seconds later the close
+Pick a side before betting closes. The price at lock becomes the strike; 20 seconds later the close
 price decides the round. Everyone on the winning side splits the whole pool (less a 1.5% fee) in
 proportion to their stake. If nobody took the other side, or the price closes exactly at the strike,
 your stake is refunded in full. Network fees for placing and claiming a bet go to Monad and are not
@@ -18,7 +19,9 @@ refundable; the app shows them before you bet.
   all-time winnings are updated once per settlement, not per bet). Bets on different markets therefore
   touch disjoint state and can execute in parallel. Bets into the same round share that round's pool
   totals, which is inherent to a shared pool.
-- **Fast blocks and low fees make 30-second rounds practical.** Each contested round needs a lock and a
+- **Continuous play.** As soon as a round stops taking bets, the next bet opens the next round while
+  the previous one is still running and settling; rounds resolve independently, each with its own pool.
+- **Fast blocks and low fees make 20-second rounds practical.** Each contested round needs a lock and a
   settle transaction, plus one transaction per bet and per claim. A round settles ~5 s after it
   closes, and the app shows the verified result after ~2.5 s.
 - **Push, not polling.** The relay and keeper subscribe to the contract's logs and new blocks over

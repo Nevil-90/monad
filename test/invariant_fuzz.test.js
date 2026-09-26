@@ -150,6 +150,10 @@ async function main() {
     const mk = await amm.markets(m);
     const rId = mk.currentRoundId;
     const round = await amm.rounds(m, rId);
+    // Continuous play: bets go to the current round while it takes bets, otherwise to the next one
+    // (which the bet opens). Sometimes the other one, which must be rejected or be harmless.
+    const takingBets = Number(round.status) === 1 && (await now()) <= Number(round.betCloseTimestamp);
+    const target = rand() < 0.85 ? (takingBets ? rId : rId + 1n) : pick([rId, rId + 1n, rId + 2n]);
     const roll = rand();
     let action;
 
@@ -166,7 +170,7 @@ async function main() {
       };
       try {
         const [u1, u2] = [pick(players), pick(players)];
-        const r1 = add(await (await amm.connect(u1).betUp(m, rId, { value: ethers.parseEther(String(int(1, 30) / 10)) })).wait(), u1);
+        const r1 = add(await (await amm.connect(u1).betUp(m, target, { value: ethers.parseEther(String(int(1, 30) / 10)) })).wait(), u1);
         if (u2 !== u1) add(await (await amm.connect(u2).betDown(m, r1, { value: ethers.parseEther(String(int(1, 30) / 10)) })).wait(), u2);
         const rr = await amm.rounds(m, r1);
         const w = Number(rr.priceWindow);
@@ -181,13 +185,13 @@ async function main() {
       // Half the time two players take opposite sides, so rounds are contested and can settle
       const pair = rand() < 0.5;
       const bettors = pair ? [[pick(players), 'betUp'], [pick(players), 'betDown']] : [[pick(players), rand() < 0.5 ? 'betUp' : 'betDown']];
-      let target = rId;
+      let into = target;
       for (const [user, side] of bettors) {
         const value = ethers.parseEther(String(int(1, 50) / 10));
         try {
-          const rc = await (await amm.connect(user)[side](m, target, { value })).wait();
+          const rc = await (await amm.connect(user)[side](m, into, { value })).wait();
           const ev = rc.logs.map((l) => { try { return amm.interface.parseLog(l); } catch (_) { return null; } }).find((e) => e?.name === 'BetPlaced');
-          target = ev.args.roundId;
+          into = ev.args.roundId;
           const key = `${m}:${ev.args.roundId}`;
           if (!betsIn.has(key)) betsIn.set(key, new Set());
           betsIn.get(key).add(addrOf.get(user));

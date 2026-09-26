@@ -126,9 +126,24 @@ check(ph({ status: 2 }, 150) === 'locked' && ph({ status: 2 }, 175) === 'settlin
 check(ph({ status: 2, closePublishTime: 180 }, 190) === 'confirming', 'A proposed (late) close report shows as confirming (SEC-28 challenge period)');
 check(ph({ status: 2 }, 771) === 'expired' && ph({ status: 1 }, 771) === 'expired', 'Contested and unresolved past expiry: refundable (SEC-29)');
 check(ph({ status: 3 }, 200) === 'ended', 'Settled: ended');
-live.state = { marketId: SUPPORTED_MARKETS.BTC.marketId, roundId: 4, closedBetting: true, expired: true };
+live.state = { marketId: SUPPORTED_MARKETS.BTC.marketId, roundId: 5, closedBetting: false, live: { roundId: 4, expired: true } };
 Object.assign(history.rounds.get(`${BTC_ID}:4`), { down: 2 });
-check(live.positions(me).find((p) => p.roundId === 4).status === 'Refunded', 'Current contested round past expiry: shown as refundable');
+check(live.positions(me).find((p) => p.roundId === 4).status === 'Refunded', 'Running contested round past expiry: shown as refundable');
+
+console.log('\n--- Continuous play: the round to bet on and the running round ---');
+{
+  const R = (id, o) => ({ roundId: id, status: 1, totalUp: 0n, totalDown: 0n, startTimestamp: 0, betCloseTimestamp: 100, lockTimestamp: 105, closeTimestamp: 125, expiryTimestamp: 725, finalizeAfter: 0, closePublishTime: 0, lockPrice: 0n, upBettors: 0, downBettors: 0, feeBps: 150, ...o });
+  let d = LiveRounds.derive(R(9, { totalUp: 1n, totalDown: 1n }), null, 90);
+  check(d.phase === 'open' && d.roundId === 9 && d.live === null, 'Current round taking bets: bets go into it, nothing running yet');
+  d = LiveRounds.derive(R(9, { totalUp: 1n, totalDown: 1n }), null, 101);
+  check(d.phase === 'next' && d.roundId === 10 && d.live?.roundId === 9 && d.live.phase === 'closed',
+    'Its betting closed: a bet opens round 10 while round 9 runs (shown live, strike next)');
+  d = LiveRounds.derive(R(10, { betCloseTimestamp: 130 }), R(9, { status: 2, totalUp: 1n, totalDown: 1n, lockPrice: 84000n * 10n ** 36n }), 110);
+  check(d.phase === 'open' && d.roundId === 10 && d.live?.roundId === 9 && d.live.phase === 'locked' && d.lockPrice === 84000,
+    'Round 10 takes bets while round 9 runs: the chart strike is round 9\'s');
+  d = LiveRounds.derive(R(9, { totalUp: 1n }), null, 101);
+  check(d.phase === 'next' && d.live === null, 'A one-sided round is never shown running (it is refunded)');
+}
 
 console.log('\n--- Report history lookup ---');
 {
@@ -163,7 +178,7 @@ console.log('\n--- Early result from the signed close report ---');
     lr.oracle = Promise.resolve({ set: new Set(oracleAddrs.map((a) => a.toLowerCase())), threshold: 4 });
     lr.state = { marketKey: 'BTC', marketId: SUPPORTED_MARKETS.BTC.marketId, roundId: 7 };
     globalThis.fetch = async () => ({ ok: true, json: async () => reports.map((r) => ({ value: String(r.value), timestampMs: String(r.timestampMs), signature: r.signature })) });
-    await lr.tryEarlyResult('k', SUPPORTED_MARKETS.BTC, closeTs, { roundId: 7, lockPrice: strike * 10n ** 28n });
+    await lr.tryEarlyResult(`${SUPPORTED_MARKETS.BTC.marketId.toLowerCase()}:7`, SUPPORTED_MARKETS.BTC, closeTs, { roundId: 7, lockPrice: strike * 10n ** 28n });
     return results;
   };
   const signed = (keys, value, ts = closeTs) => keys.map((k) => signReport(k, 'BTC', value, BigInt(ts) * 1000n));

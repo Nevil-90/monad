@@ -45,7 +45,15 @@ export const MONAD_TESTNET = MONAD_NETWORKS.testnet;
 export class Web3Manager {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
-    this.provider = typeof window !== 'undefined' ? (window.ethereum || null) : null;
+    // The wallet the user picked (EIP-1193 provider); null until one is chosen
+    this.provider = null;
+    this.walletInfo = null;
+    // The network the app runs on (.env: NEXT_PUBLIC_CHAIN_ID); every wallet is checked against it
+    this.currentEnvKey = 'testnet';
+    // Installed wallets, discovered with EIP-6963 so each one is addressed directly (no fight over
+    // window.ethereum between extensions, and no extension's own chooser window)
+    this.wallets = new Map(); // uuid -> { info: { uuid, name, icon, rdns }, provider }
+    this.discoverWallets();
     this.account = null;
     this.chainId = null;
     this.balance = null;
@@ -76,7 +84,29 @@ export class Web3Manager {
       liveGasPriceWei: null
     };
 
-    this.initListeners();
+  }
+
+  discoverWallets() {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('eip6963:announceProvider', (e) => {
+      const { info, provider } = e.detail || {};
+      if (!info?.uuid || !provider?.request) return;
+      this.wallets.set(info.uuid, { info, provider });
+      this.emit('walletsChanged', this.walletList());
+    });
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+  }
+
+  /**
+   * Wallets to offer: every EIP-6963 wallet, or, for an older extension that only sets
+   * window.ethereum, that one as "Browser wallet"
+   */
+  walletList() {
+    const list = [...this.wallets.values()];
+    if (!list.length && typeof window !== 'undefined' && window.ethereum?.request) {
+      list.push({ info: { uuid: 'injected', name: 'Browser wallet', icon: null, rdns: 'injected' }, provider: window.ethereum });
+    }
+    return list;
   }
 
   setContractAddress(addr) {
@@ -117,13 +147,17 @@ export class Web3Manager {
   }
 
   isWalletInstalled() {
-    return typeof window !== 'undefined' && Boolean(window.ethereum);
+    return this.walletList().length > 0;
   }
 
+  /** Follows account and network changes of the chosen wallet only */
   initListeners() {
-    if (!this.provider) return;
-
-    this.provider.on('accountsChanged', (accounts) => {
+    if (!this.provider?.on) return;
+    if (this.listening && this.listening !== this.provider) this.listening.removeListener?.('accountsChanged', this.onAccounts);
+    if (this.listening && this.listening !== this.provider) this.listening.removeListener?.('chainChanged', this.onChain);
+    if (this.listening === this.provider) return;
+    this.listening = this.provider;
+    this.onAccounts = (accounts) => {
       if (accounts.length === 0) {
         this.disconnect();
       } else {
@@ -131,46 +165,89 @@ export class Web3Manager {
         this.fetchBalance();
         this.emit('accountChanged', this.account);
       }
-    });
-
-    this.provider.on('chainChanged', (chainId) => {
+    };
+    this.onChain = (chainId) => {
       this.chainId = chainId;
       this.checkNetworkMatch();
       this.fetchBalance();
       this.emit('networkChanged', { chainId, isMonad: this.isLiveNetwork });
-    });
+    };
+    this.provider.on('accountsChanged', this.onAccounts);
+    this.provider.on('chainChanged', this.onChain);
   }
 
   checkNetworkMatch() {
-    if (!this.chainId) return false;
     const targetNet = this.getActiveNetworkConfig();
+    if (!this.chainId || !targetNet) {
+      this.isLiveNetwork = false;
+      return false;
+    }
     this.isLiveNetwork = parseInt(this.chainId, 16) === targetNet.chainIdDecimal;
     return this.isLiveNetwork;
   }
 
-  async connect() {
-    if (!this.provider) {
-      return {
-        success: false,
-        error: 'No browser wallet found.'
-      };
-    }
+  /** Plain-language reason for a wallet error (EIP-1193 / JSON-RPC codes) */
+  static walletError(err, walletName = 'your wallet', networkName = 'the network') {
+    const code = err?.code ?? err?.info?.error?.code ?? err?.error?.code;
+    if (code === 4001 || code === 'ACTION_REJECTED') return `Cancelled in ${walletName}.`;
+    if (code === -32002) return `${walletName} already has a request waiting: open the extension to approve or reject it.`;
+    if (code === 4200 || code === -32601) return `${walletName} does not support this request. Add ${networkName} to it manually, or use MetaMask, Rabby or Phantom.`;
+    if (code === 4100) return `${walletName} has not authorised this site. Unlock it and try again.`;
+    if (code === 4900 || code === 4901) return `${walletName} is disconnected from ${networkName}. Check its network settings.`;
+    return err?.shortMessage || err?.message || `${walletName} returned an error.`;
+  }
 
+  /** Reconnects a wallet chosen before, without a prompt (eth_accounts only lists authorised accounts) */
+  async restoreSession() {
+    let saved = null;
+    try { saved = localStorage.getItem('mp.wallet'); } catch (_) { /* storage unavailable */ }
+    if (!saved) return false;
+    // Give wallets a moment to announce themselves
+    for (let i = 0; i < 10 && !this.walletList().some((w) => w.info.rdns === saved); i++) await new Promise((r) => setTimeout(r, 100));
+    const wallet = this.walletList().find((w) => w.info.rdns === saved);
+    if (!wallet) return false;
     try {
-      // 1. Request Account Access
-      const accounts = await this.provider.request({ method: 'eth_requestAccounts' });
-      this.account = accounts[0];
+      const accounts = await wallet.provider.request({ method: 'eth_accounts' });
+      if (!accounts?.length) return false;
+      await this.connect(wallet.info.uuid, { silent: true });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
-      // 2. Verify / Switch to active Monad Network
-      const currentChainId = await this.provider.request({ method: 'eth_chainId' });
-      this.chainId = currentChainId;
-
-      const targetNet = this.getActiveNetworkConfig();
-      if (parseInt(currentChainId, 16) !== targetNet.chainIdDecimal) {
-        await this.switchToMonad(this.currentEnvKey);
-      } else {
-        this.isLiveNetwork = true;
+  /**
+   * Connects the wallet with this uuid (from walletList()). Validates what the app needs: an EVM
+   * account, and the app's Monad network (switching or adding it). A wallet that stays on another
+   * network is connected for viewing but cannot bet (wrongNetwork: true, with the reason).
+   */
+  async connect(walletId, { silent = false } = {}) {
+    const wallet = this.walletList().find((w) => w.info.uuid === walletId) || (walletId ? null : this.walletList()[0]);
+    if (!wallet) {
+      return { success: false, error: 'No wallet found in this browser. Install MetaMask, Rabby or Phantom, then reload.' };
+    }
+    const name = wallet.info.name || 'your wallet';
+    const targetNet = this.getActiveNetworkConfig();
+    try {
+      const accounts = await wallet.provider.request({ method: silent ? 'eth_accounts' : 'eth_requestAccounts' });
+      if (!Array.isArray(accounts) || !accounts.length || !/^0x[0-9a-fA-F]{40}$/.test(accounts[0] || '')) {
+        return { success: false, error: `${name} did not share an EVM account. Unlock it, choose an Ethereum-style (0x…) account, and try again.` };
       }
+      this.provider = wallet.provider;
+      this.walletInfo = wallet.info;
+      this.initListeners();
+      this.account = accounts[0];
+      try { localStorage.setItem('mp.wallet', wallet.info.rdns); } catch (_) { /* storage unavailable */ }
+
+      // The app's Monad network: switch to it, or add it to the wallet first
+      this.chainId = await wallet.provider.request({ method: 'eth_chainId' });
+      let networkError = null;
+      if (parseInt(this.chainId, 16) !== targetNet.chainIdDecimal) {
+        const switched = silent ? { ok: false, error: null } : await this.switchToMonad(this.currentEnvKey);
+        if (switched.ok) this.chainId = targetNet.chainId;
+        else networkError = switched.error || `${name} is on another network. Switch it to ${targetNet.chainName} to bet.`;
+      }
+      this.checkNetworkMatch();
 
       // 3. Fetch Real Monad Balance
       await this.fetchBalance();
@@ -183,52 +260,51 @@ export class Web3Manager {
         account: this.account,
         balance: this.balance,
         chainId: this.chainId,
+        wallet: this.walletInfo,
         isLiveNetwork: this.isLiveNetwork,
+        networkError,
+        silent,
         protocolState: this.protocolState
       });
 
-      return {
-        success: true,
-        account: this.account,
-        balance: this.balance,
-        isLiveNetwork: this.isLiveNetwork
-      };
+      return { success: true, account: this.account, balance: this.balance, isLiveNetwork: this.isLiveNetwork, networkError };
     } catch (err) {
-      console.error('Wallet connection failed:', err);
-      return {
-        success: false,
-        error: err.message || 'User rejected wallet connection'
-      };
+      return { success: false, error: Web3Manager.walletError(err, name, targetNet.chainName) };
     }
   }
 
-  async switchToMonad(envKey = 'testnet') {
-    if (!this.provider) return false;
-    const targetNet = MONAD_NETWORKS[envKey];
-    if (!targetNet) return false;
+  /** SEC-19: never send a transaction to another chain. Re-reads the wallet's chain first. */
+  async ensureNetwork() {
     try {
-      await this.provider.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: targetNet.chainId }]
-      });
-      this.isLiveNetwork = true;
-      return true;
-    } catch (switchError) {
-      if (switchError.code === 4902 || switchError.message?.includes('Unrecognized chain')) {
-        try {
-          await this.provider.request({
-            method: 'wallet_addEthereumChain',
-            params: [targetNet]
-          });
-          this.isLiveNetwork = true;
-          return true;
-        } catch (addError) {
-          console.error(`Failed to add ${targetNet.chainName}:`, addError);
-          return false;
-        }
-      }
-      return false;
+      this.chainId = await this.provider.request({ method: 'eth_chainId' });
+    } catch (err) {
+      return { ok: false, error: Web3Manager.walletError(err, this.walletInfo?.name) };
     }
+    if (this.checkNetworkMatch()) return { ok: true };
+    const switched = await this.switchToMonad(this.currentEnvKey);
+    return switched.ok ? switched : { ok: false, error: `${switched.error} Transactions need ${this.getActiveNetworkConfig().chainName}.` };
+  }
+
+  /** Switches the wallet to the app's network, adding it first if the wallet does not know it */
+  async switchToMonad(envKey = this.currentEnvKey) {
+    const targetNet = MONAD_NETWORKS[envKey];
+    const name = this.walletInfo?.name || 'your wallet';
+    if (!this.provider || !targetNet) return { ok: false, error: 'No wallet connected.' };
+    try {
+      await this.provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: targetNet.chainId }] });
+    } catch (switchError) {
+      const unknownChain = switchError.code === 4902 || switchError?.data?.originalError?.code === 4902 || /unrecognized|not added|unknown chain/i.test(switchError.message || '');
+      if (!unknownChain) return { ok: false, error: Web3Manager.walletError(switchError, name, targetNet.chainName) };
+      try {
+        await this.provider.request({ method: 'wallet_addEthereumChain', params: [targetNet] });
+      } catch (addError) {
+        return { ok: false, error: Web3Manager.walletError(addError, name, targetNet.chainName) };
+      }
+    }
+    // Confirm the wallet really is on it now (some wallets resolve before switching)
+    this.chainId = await this.provider.request({ method: 'eth_chainId' });
+    const ok = this.checkNetworkMatch();
+    return ok ? { ok: true } : { ok: false, error: `${name} did not switch to ${targetNet.chainName}.` };
   }
 
   async fetchBalance() {
@@ -288,7 +364,8 @@ export class Web3Manager {
         { key: 'treasuryFeeBps', name: 'treasuryFeeBps', transform: Number },
         { key: 'minBetWei', name: 'minBet', transform: BigInt },
         { key: 'lockBufferSeconds', name: 'lockBufferSeconds', transform: Number },
-        { key: 'priceWindowSeconds', name: 'priceWindowSeconds', transform: Number }
+        { key: 'priceWindowSeconds', name: 'priceWindowSeconds', transform: Number },
+        { key: 'bettingWindowSeconds', name: 'bettingWindowSeconds', transform: Number }
       ];
 
       for (const item of calls) {
@@ -358,9 +435,8 @@ export class Web3Manager {
       return { success: false, error: 'Wallet not connected' };
     }
 
-    if (!this.isLiveNetwork && !(await this.switchToMonad(this.currentEnvKey))) {
-      return { success: false, error: `Switch your wallet to ${this.getActiveNetworkConfig().chainName} to place a bet.` };
-    }
+    const net = await this.ensureNetwork();
+    if (!net.ok) return { success: false, error: net.error };
 
     try {
       const valueWei = ethers.parseEther(amountMon.toString());
@@ -407,6 +483,8 @@ export class Web3Manager {
    */
   async claimPayout(marketIdInput, roundId) {
     if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
+    const net = await this.ensureNetwork();
+    if (!net.ok) return { success: false, error: net.error };
     try {
       const marketBytes32 = this.formatBytes32(marketIdInput);
       const data = this.iface.encodeFunctionData('claimPayout', [marketBytes32, roundId]);
@@ -429,6 +507,8 @@ export class Web3Manager {
    */
   async claimBatch(marketIdInput, roundIds) {
     if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
+    const net = await this.ensureNetwork();
+    if (!net.ok) return { success: false, error: net.error };
     try {
       const marketBytes32 = this.formatBytes32(marketIdInput);
       const data = this.iface.encodeFunctionData('claimBatch', [marketBytes32, roundIds]);
@@ -451,6 +531,8 @@ export class Web3Manager {
    */
   async emergencyRefund(marketIdInput, roundId) {
     if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
+    const net = await this.ensureNetwork();
+    if (!net.ok) return { success: false, error: net.error };
     try {
       const marketBytes32 = this.formatBytes32(marketIdInput);
       const data = this.iface.encodeFunctionData('emergencyRefund', [marketBytes32, roundId]);
@@ -473,6 +555,8 @@ export class Web3Manager {
    */
   async claimCreatorFees(marketIdInput) {
     if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
+    const net = await this.ensureNetwork();
+    if (!net.ok) return { success: false, error: net.error };
     try {
       const marketBytes32 = this.formatBytes32(marketIdInput);
       const data = this.iface.encodeFunctionData('claimCreatorFees', [marketBytes32]);
@@ -495,6 +579,8 @@ export class Web3Manager {
    */
   async createMarket(feed, name, symbol, roundDurationSec) {
     if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
+    const net = await this.ensureNetwork();
+    if (!net.ok) return { success: false, error: net.error };
     try {
       const data = this.iface.encodeFunctionData('createMarket', [
         ethers.encodeBytes32String(feed), name, symbol, roundDurationSec
@@ -618,9 +704,13 @@ export class Web3Manager {
     return ethers.ZeroHash;
   }
 
+  /** Forgets the wallet in this app (the wallet itself keeps its own site permission) */
   disconnect() {
     this.account = null;
-    this.balance = '0.00';
+    this.balance = null;
+    this.provider = null;
+    this.walletInfo = null;
+    try { localStorage.removeItem('mp.wallet'); } catch (_) { /* storage unavailable */ }
     this.emit('disconnected');
   }
 

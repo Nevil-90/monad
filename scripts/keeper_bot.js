@@ -5,7 +5,8 @@
  *
  * Event-driven, nothing is polled:
  *   - the contract's logs arrive over Monad's WebSocket (ChainStream); any event on a market makes the
- *     keeper re-read that market's current round once
+ *     keeper re-read that market's recent rounds once (continuous play: a round may still be running
+ *     or settling after the next one opened)
  *   - otherwise the keeper sleeps until the round's next deadline (lock time, close time, the report's
  *     publication ~12 s later, the end of a challenge period, expiry) and acts then
  *   - the report for a round's pinned time is fetched once from RedStone's 24 h history
@@ -44,6 +45,9 @@ const privateKey = process.env.KEEPER_PRIVATE_KEY;
 const REPORT_ATTEMPTS_S = [1.5, 2.5, 3.5, 5, 8, 12, 20, 45];
 const GIVE_UP_S = REPORT_ATTEMPTS_S[REPORT_ATTEMPTS_S.length - 1];
 const RETRY_AFTER_ERROR_S = 10;
+// Rounds per market checked on each look: the current one and the ones before it that may still be
+// locking or settling while the next is already taking bets
+const ROUNDS_BACK = 4;
 const LOW_BALANCE = ethers.parseEther('1');
 const CLAIM_REWARDS_AT = ethers.parseEther('0.05');
 
@@ -202,11 +206,23 @@ class Keeper {
   }
 
   /** Acts on the market's current round if something is due; returns when to look again (s), or null */
+  /**
+   * Continuous play: the next round can open while earlier ones are still locking or settling, so
+   * the last few rounds of the market are checked. Returns the earliest time one needs a look (s).
+   */
   async checkMarket(market) {
     const m = await this.amm.markets(market.marketId);
     if (m.currentRoundId === 0n) return null;
-    const rId = m.currentRoundId;
-    const round = await this.amm.rounds(market.marketId, rId);
+    let next = null;
+    for (let rId = m.currentRoundId; rId >= 1n && rId > m.currentRoundId - BigInt(ROUNDS_BACK); rId--) {
+      const round = await this.amm.rounds(market.marketId, rId);
+      const at = await this.checkRound(market, rId, round);
+      if (at !== null && (next === null || at < next)) next = at;
+    }
+    return next;
+  }
+
+  async checkRound(market, rId, round) {
     const status = Number(round.status);
     const now = Math.floor(Date.now() / 1000);
     const key = `${market.feed}:${rId}`;
@@ -216,13 +232,10 @@ class Keeper {
     if (status !== 1 && status !== 2) return null;
     if (round.totalUp === 0n || round.totalDown === 0n) return null;
 
-    // A contested round nobody could resolve: cancel it so the market moves on (its bettors can also
-    // refund directly, SEC-26)
+    // A contested round nobody could resolve: its bettors refund directly (SEC-26), and it does not
+    // block the market (the next bet opens a new round), so the keeper spends nothing on it
     const expiry = Number(round.expiryTimestamp);
-    if (now > expiry) {
-      await this.send('REFUND', 'emergencyRefund', market, rId);
-      return null;
-    }
+    if (now > expiry) return null;
 
     const step = Number(round.priceWindow);
     const delay = Number(round.maxReportDelay);

@@ -113,7 +113,7 @@ const MUTATIONS = [
     name: 'Use the live lockBufferSeconds instead of the per-round snapshot',
     from: 'block.timestamp <= round.betCloseTimestamp,',
     to: 'block.timestamp <= round.lockTimestamp - lockBufferSeconds,',
-    extra: [['round.betCloseTimestamp = uint40(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));', 'round.betCloseTimestamp = uint40(lock - lockBufferSeconds);']],
+    extra: [['round.betCloseTimestamp = uint40(lock - buffer);', 'round.betCloseTimestamp = uint40(lock - lockBufferSeconds);']],
     expect: ['SEC-05']
   },
   {

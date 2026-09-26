@@ -458,7 +458,8 @@ async function main() {
     await warpTo(round.closeTimestamp + 601n);
     await (await amm.connect(stranger).emergencyRefund(m, rId)).wait();
     check('SEC-21', Number((await amm.rounds(m, rId)).status) === 4, 'After 10 minutes anyone can cancel it for a full refund');
-    check('SEC-21', (await amm.markets(m)).currentRoundId === rId + 1n, 'The market continues with a new round');
+    await (await amm.connect(alice).betUp(m, rId + 1n, { value: ethers.parseEther('1') })).wait();
+    check('SEC-21', (await amm.markets(m)).currentRoundId === rId + 1n, 'The market continues: the next bet opens a new round');
   });
 
   // ---------------------------------------------------------------------------

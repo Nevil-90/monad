@@ -57,6 +57,19 @@ export const AMM_ABI = [
     "anonymous": false,
     "inputs": [
       {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "bettingWindowSeconds",
+        "type": "uint256"
+      }
+    ],
+    "name": "BettingWindowUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
         "indexed": true,
         "internalType": "bytes32",
         "name": "marketId",
@@ -740,6 +753,19 @@ export const AMM_ABI = [
   },
   {
     "inputs": [],
+    "name": "bettingWindowSeconds",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "cancelOracleSignersProposal",
     "outputs": [],
     "stateMutability": "nonpayable",
@@ -928,50 +954,6 @@ export const AMM_ABI = [
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "marketId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "roundId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getLiveOdds",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "upMultiplierWad",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "downMultiplierWad",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "totalUp",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "totalDown",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "totalPool",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "getMarketCount",
     "outputs": [
@@ -979,289 +961,6 @@ export const AMM_ABI = [
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "cursor",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "size",
-        "type": "uint256"
-      }
-    ],
-    "name": "getMarketsPaginated",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "bytes32",
-            "name": "marketId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "address",
-            "name": "creator",
-            "type": "address"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "feedId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "string",
-            "name": "name",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "symbol",
-            "type": "string"
-          },
-          {
-            "internalType": "uint256",
-            "name": "roundDuration",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "currentRoundId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "totalVolume",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "creatorFeesAccrued",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "active",
-            "type": "bool"
-          },
-          {
-            "internalType": "bool",
-            "name": "verified",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct MonadUpDownAMM.Market[]",
-        "name": "result",
-        "type": "tuple[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "nextCursor",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "marketId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "roundId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getRound",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "uint32",
-            "name": "roundId",
-            "type": "uint32"
-          },
-          {
-            "internalType": "uint40",
-            "name": "startTimestamp",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint40",
-            "name": "lockTimestamp",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint40",
-            "name": "closeTimestamp",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint40",
-            "name": "betCloseTimestamp",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint40",
-            "name": "expiryTimestamp",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint16",
-            "name": "priceWindow",
-            "type": "uint16"
-          },
-          {
-            "internalType": "uint40",
-            "name": "lockPublishTime",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint40",
-            "name": "closePublishTime",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint40",
-            "name": "finalizeAfter",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint16",
-            "name": "feeBps",
-            "type": "uint16"
-          },
-          {
-            "internalType": "uint16",
-            "name": "creatorFeeBps",
-            "type": "uint16"
-          },
-          {
-            "internalType": "uint16",
-            "name": "keeperFeeBps",
-            "type": "uint16"
-          },
-          {
-            "internalType": "uint16",
-            "name": "maxReportDelay",
-            "type": "uint16"
-          },
-          {
-            "internalType": "address",
-            "name": "lockKeeper",
-            "type": "address"
-          },
-          {
-            "internalType": "enum MonadUpDownAMM.RoundStatus",
-            "name": "status",
-            "type": "uint8"
-          },
-          {
-            "internalType": "enum MonadUpDownAMM.Side",
-            "name": "winningSide",
-            "type": "uint8"
-          },
-          {
-            "internalType": "uint32",
-            "name": "upBettors",
-            "type": "uint32"
-          },
-          {
-            "internalType": "uint32",
-            "name": "downBettors",
-            "type": "uint32"
-          },
-          {
-            "internalType": "uint256",
-            "name": "lockPrice",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "closePrice",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "totalUp",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "totalDown",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "totalPool",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "netPayoutPool",
-            "type": "uint256"
-          }
-        ],
-        "internalType": "struct MonadUpDownAMM.Round",
-        "name": "",
-        "type": "tuple"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "marketId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "roundId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      }
-    ],
-    "name": "getUserBet",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "uint256",
-            "name": "amount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "enum MonadUpDownAMM.Side",
-            "name": "side",
-            "type": "uint8"
-          },
-          {
-            "internalType": "bool",
-            "name": "claimed",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct MonadUpDownAMM.UserBet",
-        "name": "",
-        "type": "tuple"
       }
     ],
     "stateMutability": "view",
@@ -1719,6 +1418,19 @@ export const AMM_ABI = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_bettingWindow",
+        "type": "uint256"
+      }
+    ],
+    "name": "setBettingWindow",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

@@ -101,8 +101,13 @@ contract MonadUpDownAMM is SignedPriceOracle {
     // The final price is the earliest report anyone captured; the pinned report settles at once.
     uint256 public constant MAX_REPORT_DELAY = 30;
     uint256 public constant CHALLENGE_PERIOD = 60;
+    // How long a new round takes bets before its strike (the lock time is the first report mark at
+    // least this far ahead). 0 = the market's roundDuration. Snapshotted into each round at start.
+    uint256 public bettingWindowSeconds;
     uint256 public minBet = 0.001 ether;       // Minimum bet in native MON; set from live gas at deploy (SEC-11)
-    uint256 public constant MIN_ROUND_DURATION = 30;   // Minimum 30s round
+    // A round's price window (lock to close). At least two oracle report intervals, so the lock and
+    // close report windows never overlap (the report interval is clamped to half of it).
+    uint256 public constant MIN_ROUND_DURATION = 20;
     uint256 public constant MAX_ROUND_DURATION = 86400;// Maximum 1 day
 
     address public owner;
@@ -144,6 +149,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
     // Events (Fully Indexable on-chain)
     event ProtocolFeesUpdated(uint256 creatorFeeBps, uint256 keeperFeeBps, uint256 treasuryFeeBps, uint256 protocolTotalFeeBps);
     event ProtocolParametersUpdated(uint256 lockBufferSeconds, uint256 priceWindowSeconds, uint256 emergencyTimeout, uint256 minBet);
+    event BettingWindowUpdated(uint256 bettingWindowSeconds);
     event MarketCreated(
         bytes32 indexed marketId,
         address indexed creator,
@@ -235,6 +241,16 @@ contract MonadUpDownAMM is SignedPriceOracle {
     }
 
 
+    /**
+     * @notice How long new rounds take bets before their strike (0 = each market's roundDuration).
+     * Applies to rounds started afterwards only (SEC-05).
+     */
+    function setBettingWindow(uint256 _bettingWindow) external onlyOwner {
+        require(_bettingWindow == 0 || (_bettingWindow >= 10 && _bettingWindow <= MAX_ROUND_DURATION), "Invalid betting window");
+        bettingWindowSeconds = _bettingWindow;
+        emit BettingWindowUpdated(_bettingWindow);
+    }
+
     // =========================================================================
     // ADMIN: PAUSE, MARKET CURATION (SEC-06, SEC-08)
     // =========================================================================
@@ -322,12 +338,15 @@ contract MonadUpDownAMM is SignedPriceOracle {
         Market storage market = markets[marketId];
         require(market.active, "Market inactive");
 
-        // Strict Sequencing Check: Prevent rogue spam-incrementation while a round is still active
+        // Continuous play: a new round may start as soon as the current one stops taking bets, while the
+        // current one is still locking, running or settling (rounds resolve independently, by id).
+        // Never while the current round still takes bets, so rounds cannot be spammed.
         if (market.currentRoundId > 0) {
             Round storage prev = rounds[marketId][market.currentRoundId];
             require(
-                prev.status == RoundStatus.Settled || prev.status == RoundStatus.Cancelled,
-                "Previous round still active"
+                prev.status == RoundStatus.Settled || prev.status == RoundStatus.Cancelled
+                    || block.timestamp > prev.betCloseTimestamp,
+                "Current round still taking bets"
             );
         }
 
@@ -339,8 +358,9 @@ contract MonadUpDownAMM is SignedPriceOracle {
         // report interval after close for the next one.
         uint256 half = market.roundDuration / 2;
         uint256 window = priceWindowSeconds < half ? priceWindowSeconds : half;
+        uint256 betting = bettingWindowSeconds == 0 ? market.roundDuration : bettingWindowSeconds;
         uint256 start = block.timestamp;
-        uint256 lock = _pinnedTimestamp(start + market.roundDuration, window);
+        uint256 lock = _pinnedTimestamp(start + betting, window);
         uint256 close = lock + market.roundDuration;
 
         Round storage round = rounds[marketId][newRoundId];
@@ -360,17 +380,14 @@ contract MonadUpDownAMM is SignedPriceOracle {
         // SEC-05: snapshot timing and clamp to half the duration so betting always has a window
         // and the lock/close report windows can never overlap (pinned lock + priceWindow + delay
         // stays below closeTimestamp).
-        round.betCloseTimestamp = uint40(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));
+        // The cutoff before the strike never exceeds half the round or half the betting window
+        uint256 buffer = lockBufferSeconds < half ? lockBufferSeconds : half;
+        if (buffer > betting / 2) buffer = betting / 2;
+        round.betCloseTimestamp = uint40(lock - buffer);
         round.priceWindow = uint16(window);
         round.maxReportDelay = uint16(MAX_REPORT_DELAY < half ? MAX_REPORT_DELAY : half);
 
         emit RoundStarted(marketId, newRoundId, lock, close);
-    }
-
-    function _startRoundIfActive(bytes32 marketId) internal {
-        if (markets[marketId].active) {
-            _startRound(marketId);
-        }
     }
 
     /**
@@ -408,6 +425,23 @@ contract MonadUpDownAMM is SignedPriceOracle {
         require(market.active, "Market inactive");
 
         Round storage round = rounds[marketId][roundId];
+
+        // Continuous play: a bet for the next round opens it once the current round stops taking bets,
+        // while the current one keeps running. An expired one-sided current round is cancelled first
+        // (refundable, SEC-26).
+        if (roundId == market.currentRoundId + 1 && market.currentRoundId > 0) {
+            Round storage cur = rounds[marketId][market.currentRoundId];
+            if (
+                cur.status == RoundStatus.Open &&
+                (cur.totalUp == 0 || cur.totalDown == 0) &&
+                block.timestamp > cur.betCloseTimestamp
+            ) {
+                cur.status = RoundStatus.Cancelled;
+                emit RoundCancelled(marketId, market.currentRoundId, cur.totalPool == 0 ? "Idle round replaced by a new round" : "Uncontested pool: opposite side has zero liquidity");
+            }
+            roundId = _startRound(marketId);
+            round = rounds[marketId][roundId];
+        }
 
         // Idle markets cost nothing (SEC-24/26): a current round whose betting window passed while one
         // side (or both) stayed empty can never be contested, so the next bet cancels it and opens a
@@ -488,7 +522,6 @@ contract MonadUpDownAMM is SignedPriceOracle {
         if (round.status == RoundStatus.Open && (round.totalUp == 0 || round.totalDown == 0)) {
             round.status = RoundStatus.Cancelled;
             emit RoundCancelled(marketId, roundId, "Uncontested pool: opposite side has zero liquidity");
-            _startRoundIfActive(marketId);
             return;
         }
         // SEC-29: past expiry the round is refundable; resolving it now could pay winners from
@@ -601,8 +634,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
             emit RoundSettled(marketId, roundId, price, round.winningSide, msg.sender, keeperReward);
         }
 
-        // Automatically chain-start the next round
-        _startRoundIfActive(marketId);
+        // The next round is opened by the next bet (continuous play), not here: settling stays cheap
     }
 
     /**
@@ -706,9 +738,6 @@ contract MonadUpDownAMM is SignedPriceOracle {
         round.status = RoundStatus.Cancelled;
         emit RoundCancelled(marketId, roundId, "Emergency timeout: unresolved round cancelled for full refund");
 
-        if (markets[marketId].currentRoundId == roundId) {
-            _startRoundIfActive(marketId);
-        }
     }
 
     /**
@@ -818,35 +847,6 @@ contract MonadUpDownAMM is SignedPriceOracle {
         return allMarketIds.length;
     }
 
-    function getRound(bytes32 marketId, uint256 roundId) external view returns (Round memory) {
-        return rounds[marketId][roundId];
-    }
-
-    function getUserBet(bytes32 marketId, uint256 roundId, address user) external view returns (UserBet memory) {
-        return userBets[marketId][roundId][user];
-    }
-
-    function getLiveOdds(bytes32 marketId, uint256 roundId)
-        external
-        view
-        returns (
-            uint256 upMultiplierWad,
-            uint256 downMultiplierWad,
-            uint256 totalUp,
-            uint256 totalDown,
-            uint256 totalPool
-        )
-    {
-        Round storage round = rounds[marketId][roundId];
-        totalUp = round.totalUp;
-        totalDown = round.totalDown;
-        totalPool = round.totalPool;
-
-        uint256 fee = round.feeBps > 0 ? round.feeBps : protocolTotalFeeBps;
-        upMultiplierWad = AMMMath.calculateMultiplier(round.totalPool, round.totalUp, fee);
-        downMultiplierWad = AMMMath.calculateMultiplier(round.totalPool, round.totalDown, fee);
-    }
-
     function withdrawTreasury(bytes32 marketId, address recipient) external onlyOwner nonReentrant {
         require(recipient != address(0), "Invalid recipient");
         uint256 amount = treasuryFees[marketId];
@@ -855,30 +855,6 @@ contract MonadUpDownAMM is SignedPriceOracle {
         (bool success, ) = payable(recipient).call{value: amount}("");
         require(success, "Withdraw failed");
         emit TreasuryWithdrawn(marketId, recipient, amount);
-    }
-
-    /**
-     * @notice Allows safe paginated market retrieval to prevent out-of-gas errors on public RPCs
-     */
-    function getMarketsPaginated(uint256 cursor, uint256 size)
-        external
-        view
-        returns (Market[] memory result, uint256 nextCursor)
-    {
-        uint256 total = allMarketIds.length;
-        if (cursor >= total || size == 0) {
-            return (new Market[](0), cursor);
-        }
-        uint256 end = cursor + size;
-        if (end > total) {
-            end = total;
-        }
-        uint256 count = end - cursor;
-        result = new Market[](count);
-        for (uint256 i = 0; i < count; i++) {
-            result[i] = markets[allMarketIds[cursor + i]];
-        }
-        nextCursor = end;
     }
 
     /**
