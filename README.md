@@ -57,8 +57,7 @@ npm install
 npm run compile                 # contracts -> build/ and src/contracts/AMMAbi.js
 cp .env.example .env
 
-npm run relay                   # terminal 1: RedStone price relay on :8787
-npm run dev                     # terminal 2: app on http://localhost:3000 (Demo mode)
+npm run dev                     # price relay (:8787) + app on http://localhost:3000, Ctrl+C stops both
 ```
 
 Live mode against a local chain with simulated players:

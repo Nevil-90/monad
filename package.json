@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "node scripts/dev.js",
     "build": "next build",
     "compile": "node scripts/compile.js",
     "test": "node test/amm_invariants.test.js",
@@ -16,7 +16,8 @@
     "keeper": "node --env-file-if-exists=.env scripts/keeper_bot.js",
     "deploy": "node --env-file-if-exists=.env scripts/deploy.js",
     "test:all": "npm run compile && npm test && npm run test:evm && npm run test:security",
-    "start": "next start -p 3000"
+    "start": "next start -p 3000",
+    "dev:app": "next dev -p 3000"
   },
   "devDependencies": {
     "ganache": "^7.9.2",
