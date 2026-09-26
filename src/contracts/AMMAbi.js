@@ -510,58 +510,6 @@ export const AMM_ABI = [
   },
   {
     "inputs": [],
-    "name": "CREATOR_FEE_BPS",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "EMERGENCY_TIMEOUT",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "KEEPER_FEE_BPS",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "LOCK_BUFFER_SECONDS",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "MAX_ORACLE_SIGNERS",
     "outputs": [
       {
@@ -588,19 +536,6 @@ export const AMM_ABI = [
   },
   {
     "inputs": [],
-    "name": "MIN_BET",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "MIN_ROUND_DURATION",
     "outputs": [
       {
@@ -615,32 +550,6 @@ export const AMM_ABI = [
   {
     "inputs": [],
     "name": "ORACLE_CHANGE_DELAY",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "PROTOCOL_TOTAL_FEE_BPS",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "TREASURY_FEE_BPS",
     "outputs": [
       {
         "internalType": "uint256",
@@ -938,76 +847,6 @@ export const AMM_ABI = [
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "getAllMarkets",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "bytes32",
-            "name": "marketId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "address",
-            "name": "creator",
-            "type": "address"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "feedId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "string",
-            "name": "name",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "symbol",
-            "type": "string"
-          },
-          {
-            "internalType": "uint256",
-            "name": "roundDuration",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "currentRoundId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "totalVolume",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "creatorFeesAccrued",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "active",
-            "type": "bool"
-          },
-          {
-            "internalType": "bool",
-            "name": "verified",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct MonadUpDownAMM.Market[]",
-        "name": "",
-        "type": "tuple[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -1168,24 +1007,84 @@ export const AMM_ABI = [
       {
         "components": [
           {
-            "internalType": "uint256",
+            "internalType": "uint64",
             "name": "roundId",
-            "type": "uint256"
+            "type": "uint64"
           },
           {
-            "internalType": "uint256",
+            "internalType": "uint64",
             "name": "startTimestamp",
-            "type": "uint256"
+            "type": "uint64"
           },
           {
-            "internalType": "uint256",
+            "internalType": "uint64",
             "name": "lockTimestamp",
-            "type": "uint256"
+            "type": "uint64"
           },
           {
-            "internalType": "uint256",
+            "internalType": "uint64",
             "name": "closeTimestamp",
-            "type": "uint256"
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "betCloseTimestamp",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "lockPublishTime",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "closePublishTime",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint16",
+            "name": "feeBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "creatorFeeBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "keeperFeeBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "priceWindow",
+            "type": "uint16"
+          },
+          {
+            "internalType": "address",
+            "name": "lockKeeper",
+            "type": "address"
+          },
+          {
+            "internalType": "enum MonadUpDownAMM.RoundStatus",
+            "name": "status",
+            "type": "uint8"
+          },
+          {
+            "internalType": "enum MonadUpDownAMM.Side",
+            "name": "winningSide",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint32",
+            "name": "upBettors",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "downBettors",
+            "type": "uint32"
           },
           {
             "internalType": "uint256",
@@ -1215,66 +1114,6 @@ export const AMM_ABI = [
           {
             "internalType": "uint256",
             "name": "netPayoutPool",
-            "type": "uint256"
-          },
-          {
-            "internalType": "enum MonadUpDownAMM.Side",
-            "name": "winningSide",
-            "type": "uint8"
-          },
-          {
-            "internalType": "enum MonadUpDownAMM.RoundStatus",
-            "name": "status",
-            "type": "uint8"
-          },
-          {
-            "internalType": "address",
-            "name": "lockKeeper",
-            "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "feeBps",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "creatorFeeBps",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "keeperFeeBps",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "betCloseTimestamp",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "priceWindow",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "lockPublishTime",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "closePublishTime",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "upBettors",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "downBettors",
             "type": "uint256"
           }
         ],
@@ -1658,24 +1497,84 @@ export const AMM_ABI = [
     "name": "rounds",
     "outputs": [
       {
-        "internalType": "uint256",
+        "internalType": "uint64",
         "name": "roundId",
-        "type": "uint256"
+        "type": "uint64"
       },
       {
-        "internalType": "uint256",
+        "internalType": "uint64",
         "name": "startTimestamp",
-        "type": "uint256"
+        "type": "uint64"
       },
       {
-        "internalType": "uint256",
+        "internalType": "uint64",
         "name": "lockTimestamp",
-        "type": "uint256"
+        "type": "uint64"
       },
       {
-        "internalType": "uint256",
+        "internalType": "uint64",
         "name": "closeTimestamp",
-        "type": "uint256"
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "betCloseTimestamp",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "lockPublishTime",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "closePublishTime",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint16",
+        "name": "feeBps",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "creatorFeeBps",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "keeperFeeBps",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "priceWindow",
+        "type": "uint16"
+      },
+      {
+        "internalType": "address",
+        "name": "lockKeeper",
+        "type": "address"
+      },
+      {
+        "internalType": "enum MonadUpDownAMM.RoundStatus",
+        "name": "status",
+        "type": "uint8"
+      },
+      {
+        "internalType": "enum MonadUpDownAMM.Side",
+        "name": "winningSide",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint32",
+        "name": "upBettors",
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "downBettors",
+        "type": "uint32"
       },
       {
         "internalType": "uint256",
@@ -1705,66 +1604,6 @@ export const AMM_ABI = [
       {
         "internalType": "uint256",
         "name": "netPayoutPool",
-        "type": "uint256"
-      },
-      {
-        "internalType": "enum MonadUpDownAMM.Side",
-        "name": "winningSide",
-        "type": "uint8"
-      },
-      {
-        "internalType": "enum MonadUpDownAMM.RoundStatus",
-        "name": "status",
-        "type": "uint8"
-      },
-      {
-        "internalType": "address",
-        "name": "lockKeeper",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "feeBps",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "creatorFeeBps",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "keeperFeeBps",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "betCloseTimestamp",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "priceWindow",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockPublishTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "closePublishTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "upBettors",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "downBettors",
         "type": "uint256"
       }
     ],

@@ -13,6 +13,7 @@
 import { ethers } from 'ethers';
 import { getConfig, setEnvironment, ENVIRONMENTS } from './config.js';
 import { AMM_ABI } from './contracts/AMMAbi.js';
+import { MonadRpcProvider } from './rpc.js';
 
 export const MONAD_NETWORKS = {
   get testnet() {
@@ -58,7 +59,7 @@ export class Web3Manager {
     this.currentEnvKey = 'testnet';
 
     try {
-      this.readOnlyProvider = new ethers.JsonRpcProvider(getConfig().rpcUrl);
+      this.readOnlyProvider = new MonadRpcProvider(getConfig().rpcUrl, getConfig().chainId);
     } catch (_) {
       this.readOnlyProvider = null;
     }
@@ -90,28 +91,25 @@ export class Web3Manager {
     if (!conf) throw new Error(`Unknown network: ${envKey}`);
     this.contractAddress = conf.contractAddress;
     try {
-      this.readOnlyProvider = new ethers.JsonRpcProvider(conf.rpcUrl);
+      this.readOnlyProvider = new MonadRpcProvider(conf.rpcUrl, conf.chainId);
     } catch (_) {
       this.readOnlyProvider = null;
     }
     this.checkNetworkMatch();
   }
 
+  /**
+   * Contract reads always go to the configured Monad RPC, never through the wallet: a wallet can be
+   * on another network (or mid-switch), and a read sent there finds no contract.
+   */
   async ethCall(data, to = this.contractAddress) {
-    if (!to) return null;
+    if (!to || !this.readOnlyProvider) return null;
     try {
-      if (this.provider) {
-        return await this.provider.request({
-          method: 'eth_call',
-          params: [{ to, data }, 'latest']
-        });
-      } else if (this.readOnlyProvider) {
-        return await this.readOnlyProvider.call({ to, data });
-      }
-    } catch (_) {
+      return await this.readOnlyProvider.call({ to, data });
+    } catch (err) {
+      console.warn('Contract read failed:', err.shortMessage || err.message);
       return null;
     }
-    return null;
   }
 
   getActiveNetworkConfig() {
@@ -236,11 +234,8 @@ export class Web3Manager {
   async fetchBalance() {
     if (!this.provider || !this.account) return null;
     try {
-      const balanceHex = await this.provider.request({
-        method: 'eth_getBalance',
-        params: [this.account, 'latest']
-      });
-      const balanceWei = BigInt(balanceHex);
+      // Monad balance from the Monad RPC, whatever network the wallet is showing
+      const balanceWei = await this.readOnlyProvider.getBalance(this.account);
       const balanceEth = Number(balanceWei) / 1e18;
       this.balance = balanceEth.toFixed(4);
       this.emit('balanceUpdated', this.balance);
@@ -330,7 +325,8 @@ export class Web3Manager {
     } catch (err) {
       throw new Error(this.revertReason(err));
     }
-    const gasLimitWithBuffer = (BigInt(estHex) * 120n) / 100n; // +20% safety buffer
+    // Monad charges the full gas limit, not gas used (SEC-25): keep the margin small
+    const gasLimitWithBuffer = (BigInt(estHex) * 110n) / 100n;
     return '0x' + gasLimitWithBuffer.toString(16);
   }
 
@@ -556,26 +552,31 @@ export class Web3Manager {
       const data = this.iface.encodeFunctionData('rounds', [marketBytes32, roundId]);
       const resHex = await this.ethCall(data, this.contractAddress);
       if (!resHex || resHex === '0x') return null;
-      const decoded = this.iface.decodeFunctionResult('rounds', resHex);
+      // Read by field name: the struct is packed (SEC-25), so positions differ from the old layout
+      const d = this.iface.decodeFunctionResult('rounds', resHex);
       return {
-        roundId: Number(decoded[0]),
-        startTimestamp: Number(decoded[1]),
-        lockTimestamp: Number(decoded[2]),
-        closeTimestamp: Number(decoded[3]),
-        lockPrice: decoded[4],
-        closePrice: decoded[5],
-        totalUp: decoded[6],
-        totalDown: decoded[7],
-        totalPool: decoded[8],
-        netPayoutPool: decoded[9],
-        winningSide: Number(decoded[10]), // 0: None, 1: Up, 2: Down
-        status: Number(decoded[11]),      // 0: Inactive, 1: Open, 2: Locked, 3: Settled, 4: Cancelled
-        lockKeeper: decoded[12],
-        feeBps: Number(decoded[13]),
-        creatorFeeBps: Number(decoded[14]),
-        keeperFeeBps: Number(decoded[15]),
-        upBettors: decoded[20] !== undefined ? Number(decoded[20]) : null,
-        downBettors: decoded[21] !== undefined ? Number(decoded[21]) : null
+        roundId: Number(d.roundId),
+        startTimestamp: Number(d.startTimestamp),
+        lockTimestamp: Number(d.lockTimestamp),
+        closeTimestamp: Number(d.closeTimestamp),
+        betCloseTimestamp: Number(d.betCloseTimestamp),
+        lockPublishTime: Number(d.lockPublishTime),
+        closePublishTime: Number(d.closePublishTime),
+        lockPrice: d.lockPrice,
+        closePrice: d.closePrice,
+        totalUp: d.totalUp,
+        totalDown: d.totalDown,
+        totalPool: d.totalPool,
+        netPayoutPool: d.netPayoutPool,
+        winningSide: Number(d.winningSide), // 0: None, 1: Up, 2: Down
+        status: Number(d.status),           // 0: Inactive, 1: Open, 2: Locked, 3: Settled, 4: Cancelled
+        lockKeeper: d.lockKeeper,
+        feeBps: Number(d.feeBps),
+        creatorFeeBps: Number(d.creatorFeeBps),
+        keeperFeeBps: Number(d.keeperFeeBps),
+        priceWindow: Number(d.priceWindow),
+        upBettors: Number(d.upBettors),
+        downBettors: Number(d.downBettors)
       };
     } catch (err) {
       return null;

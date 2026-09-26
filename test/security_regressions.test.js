@@ -302,6 +302,28 @@ async function main() {
   });
 
   // ---------------------------------------------------------------------------
+  // SEC-25: Gas budget. Monad charges the gas limit, and starting a round is paid by the settling
+  // keeper or the first bettor. Budgets are ~10% above the packed-struct measurements.
+  // ---------------------------------------------------------------------------
+  await section('SEC-25', async () => {
+    const m = await newMarket();
+    const bet1 = await (await amm.connect(alice).betUp(m, 1n, { value: ethers.parseEther('1') })).wait();
+    await (await amm.connect(bob).betDown(m, 1n, { value: ethers.parseEther('1') })).wait();
+    const r = await amm.rounds(m, 1n);
+    await warpTo(r.lockTimestamp);
+    const lock = await (await amm.connect(keeper).lockRoundWithUpdate(m, 1n, firstAt(6425000000000n, r.lockTimestamp))).wait();
+    await warpTo(r.closeTimestamp);
+    const settle = await (await amm.connect(settler).settleRoundWithUpdate(m, 1n, firstAt(6430000000000n, r.closeTimestamp))).wait();
+    const r2 = await amm.rounds(m, 2n);
+    await warpTo(r2.betCloseTimestamp + 1n);
+    const newRoundBet = await (await amm.connect(bob).betDown(m, 2n, { value: ethers.parseEther('1') })).wait();
+    const claim = await (await amm.connect(alice).claimPayout(m, 1n)).wait();
+    for (const [label, rc, budget] of [['first bet on a side', bet1, 150000n], ['lock', lock, 130000n], ['settle (+ next round)', settle, 380000n], ['bet opening a new round', newRoundBet, 250000n], ['claim', claim, 55000n]]) {
+      check('SEC-25', rc.gasUsed <= budget, `${label}: ${rc.gasUsed} gas (budget ${budget})`);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // SEC-21: No past reports on the free gateway -> an uncaptured round refunds after 10 minutes
   // ---------------------------------------------------------------------------
   await section('SEC-21', async () => {
@@ -373,11 +395,48 @@ async function main() {
     check('SEC-24', await reverts(() => amm.connect(bob).betDown.staticCall(m, 1n, { value: ethers.parseEther('1') }), 'Round not open for bets'),
       'A stale round id is not redirected');
 
-    // A round that has bets is never replaced: a late bettor cannot void it
+    // A contested round is never replaced: a late bettor cannot void it
+    await (await amm.connect(bob).betDown(m, 2n, { value: ethers.parseEther('1') })).wait();
     await warpTo(r2.betCloseTimestamp + 1n);
-    check('SEC-24', await reverts(() => amm.connect(bob).betDown.staticCall(m, 2n, { value: ethers.parseEther('1') }), 'Betting window closed'),
-      'A late bet on a round that has bets is rejected, not turned into a new round');
-    check('SEC-24', Number((await amm.rounds(m, 2n)).status) === 1, 'The round with bets stays open for its keeper');
+    check('SEC-24', await reverts(() => amm.connect(stranger).betDown.staticCall(m, 2n, { value: ethers.parseEther('1') }), 'Betting window closed'),
+      'A late bet on a contested round is rejected, not turned into a new round');
+    check('SEC-24', Number((await amm.rounds(m, 2n)).status) === 1, 'The contested round stays open for its keeper');
+  });
+
+  // ---------------------------------------------------------------------------
+  // SEC-26: Refunds must never wait for someone else's transaction
+  // ---------------------------------------------------------------------------
+  await section('SEC-26', async () => {
+    // One-sided round: refundable by the bettor once betting closed, with no cancel transaction
+    const m = await newMarket();
+    await (await amm.connect(alice).betUp(m, 1n, { value: ethers.parseEther('3') })).wait();
+    const r1 = await amm.rounds(m, 1n);
+    check('SEC-26', await reverts(() => amm.connect(alice).claimPayout.staticCall(m, 1n), 'Round not yet resolved'),
+      'No refund while the other side can still bet');
+    await warpTo(r1.betCloseTimestamp + 1n);
+    // Raw balance reads (the BrowserProvider caches balances)
+    const bal = async () => BigInt(await ganacheProvider.request({ method: 'eth_getBalance', params: [await alice.getAddress(), 'latest'] }));
+    const before = await bal();
+    const rc = await (await amm.connect(alice).claimPayout(m, 1n)).wait();
+    const got = (await bal()) - before + rc.fee;
+    check('SEC-26', got === ethers.parseEther('3') && Number((await amm.rounds(m, 1n)).status) === 1,
+      'The bettor refunds the full stake directly, without any keeper or cancel transaction');
+    check('SEC-26', await reverts(() => amm.connect(alice).claimPayout.staticCall(m, 1n), 'Already claimed'), 'No double refund');
+    // The next bet replaces the one-sided round; its refund state is unchanged
+    await (await amm.connect(bob).betDown(m, 1n, { value: ethers.parseEther('1') })).wait();
+    check('SEC-26', (await amm.markets(m)).currentRoundId === 2n && Number((await amm.rounds(m, 1n)).status) === 4,
+      'The next bet cancels the one-sided round and opens a fresh one');
+    check('SEC-26', await reverts(() => amm.connect(alice).claimPayout.staticCall(m, 1n), 'Already claimed'), 'Still no double refund after cancellation');
+
+    // Contested round nobody could resolve: refundable directly after the timeout
+    const m2 = await newMarket();
+    const { rId, round } = await contestedRound(m2);
+    await warpTo(round.closeTimestamp + 60n);
+    check('SEC-26', await reverts(() => amm.connect(alice).claimPayout.staticCall(m2, rId), 'Round not yet resolved'),
+      'A contested round is not refundable before the timeout');
+    await warpTo(round.closeTimestamp + (await amm.emergencyTimeout()) + 1n);
+    check('SEC-26', !(await reverts(() => amm.connect(alice).claimPayout.staticCall(m2, rId))),
+      'After the timeout each bettor refunds directly, without anyone calling emergencyRefund');
   });
 
   // ---------------------------------------------------------------------------

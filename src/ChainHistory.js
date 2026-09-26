@@ -3,19 +3,20 @@
  * Reads the AMM contract's events straight from the chain so every number the UI shows can be
  * traced to a transaction. Nothing is stored server-side.
  *
- * - Starts with the most recent `historyWindowBlocks`, follows new blocks, and loads older
- *   history on demand back to `deployBlock`.
- * - Requests logs in `logChunkBlocks` ranges to respect public RPC limits.
+ * - Loads the contract's complete event history in one request from the relay's index
+ *   (scripts/lib/event_index.js), then follows new blocks. Monad's public RPCs serve at most 100
+ *   blocks per log request, too slow to scan from the browser. Every record keeps its transaction
+ *   hash, so each row links to the explorer and can be checked independently.
+ * - Totals shown as "contract counter" are read from the contract itself over Monad RPC.
  * - Classifies each PayoutClaimed as a win or a refund from how its round ended.
  *
  * For very long histories, point the dashboard at an indexer that serves the same records.
  */
 
 import { ethers } from 'ethers';
-import { SUPPORTED_MARKETS, getConfig } from './config.js';
+import { API_CONFIG, SUPPORTED_MARKETS, getConfig } from './config.js';
 
-const POLL_MS = 4000;
-const CONCURRENCY = 4;
+const CONCURRENCY = 6;
 const toMon = (v) => Number(ethers.formatEther(v));
 const toPrice = (v) => Number(ethers.formatUnits(v, 36));
 
@@ -37,8 +38,7 @@ export class ChainHistory {
     this.web3 = web3;
     const cfg = getConfig();
     this.deployBlock = cfg.deployBlock;
-    this.chunk = Math.max(1, cfg.logChunkBlocks || 100);
-    this.window = Math.max(this.chunk, cfg.historyWindowBlocks || 5000);
+    this.relayUrl = API_CONFIG.priceRelayUrl;
 
     this.records = [];              // money movements and market creations, newest first
     this.seen = new Set();          // `${tx}:${logIndex}`
@@ -90,7 +90,7 @@ export class ChainHistory {
   async start() {
     if (this.started) return;
     this.started = true;
-    if (!this.provider || !this.address) {
+    if (!this.address) {
       this.status = 'error';
       this.error = 'No contract address configured (NEXT_PUBLIC_CONTRACT_ADDRESS).';
       this.notify();
@@ -102,82 +102,65 @@ export class ChainHistory {
       this.notify();
       return;
     }
+    if (!this.relayUrl) {
+      this.status = 'error';
+      this.error = 'The Dashboard reads the contract events indexed by the relay: set NEXT_PUBLIC_PRICE_RELAY_URL.';
+      this.notify();
+      return;
+    }
     this.status = 'syncing';
     this.notify();
-    try {
-      const latest = await this.provider.getBlockNumber();
-      const from = Math.max(this.deployBlock, latest - this.window + 1);
-      await this.scan(from, latest);
-      this.oldest = from;
-      this.newest = latest;
-      this.status = 'live';
-      this.error = null;
-      await this.refreshTotals();
-    } catch (err) {
+    this.connect();
+  }
+
+  /**
+   * Opens the relay's event stream: the whole history first, then new events pushed as blocks are
+   * indexed. EventSource reconnects on its own; on reconnect it resumes after the newest block seen.
+   */
+  connect() {
+    const after = this.newest === null ? this.deployBlock - 1 : this.newest;
+    this.es = new EventSource(`${this.relayUrl}/events/stream?after=${after}`);
+    this.es.onmessage = (e) => this.apply(JSON.parse(e.data));
+    this.es.onerror = () => {
       this.status = 'error';
-      this.error = `Could not read contract events (${err.shortMessage || err.message}). Retrying…`;
-      this.started = false;
-      setTimeout(() => this.start(), 8000);
-    }
-    this.notify();
-    if (this.status === 'live' && !this.pollTimer) {
-      this.pollTimer = setInterval(() => this.poll(), POLL_MS);
-    }
+      this.error = 'Connection to the relay dropped. Reconnecting…';
+      this.notify();
+      // Reopen with a fresh `after` so nothing is fetched twice
+      this.es.close();
+      clearTimeout(this.retry);
+      this.retry = setTimeout(() => this.connect(), 3000);
+    };
   }
 
-  async poll() {
-    if (this.polling || this.newest === null) return;
-    this.polling = true;
+  async apply(body) {
     try {
-      const latest = await this.provider.getBlockNumber();
-      if (latest > this.newest) {
-        await this.scan(this.newest + 1, latest);
-        this.newest = latest;
-        await this.refreshTotals();
+      if (body.address.toLowerCase() !== this.address.toLowerCase()) {
+        throw new Error(`The relay indexes ${body.address}, not this app's contract ${this.address}.`);
       }
-      if (this.status !== 'live') {
-        this.status = 'live';
-        this.error = null;
-      }
-    } catch (_) {
-      this.status = 'error';
-      this.error = 'Connection to the Monad RPC dropped. Retrying…';
-    }
-    this.polling = false;
-    this.notify();
-  }
-
-  async loadOlder() {
-    if (!this.hasOlder() || this.loadingOlder) return;
-    this.loadingOlder = true;
-    this.notify();
-    try {
-      const to = this.oldest - 1;
-      const from = Math.max(this.deployBlock, to - this.window + 1);
-      await this.scan(from, to);
-      this.oldest = from;
-    } catch (_) {
-      this.error = 'Could not load older history. Try again.';
-    }
-    this.loadingOlder = false;
-    this.notify();
-  }
-
-  async scan(from, to) {
-    const ranges = [];
-    for (let a = from; a <= to; a += this.chunk) ranges.push([a, Math.min(to, a + this.chunk - 1)]);
-    const batches = await mapLimit(ranges, CONCURRENCY, ([a, b]) =>
-      this.provider.getLogs({ address: this.address, fromBlock: a, toBlock: b }));
-    const pendingClaims = [];
-    for (const logs of batches) {
-      for (const log of logs) {
+      const pendingClaims = [];
+      for (const log of body.logs) {
+        this.blockTimes.set(log.blockNumber, log.timestamp * 1000); // relay sends seconds; the UI uses ms
         const rec = this.ingest(log);
         if (rec && rec.type === 'claim') pendingClaims.push(rec);
       }
+      this.records.sort((x, y) => (y.block - x.block) || (y.logIndex - x.logIndex));
+      await this.classifyClaims(pendingClaims);
+      const first = this.newest === null;
+      this.oldest = this.deployBlock;
+      this.newest = Math.max(this.newest ?? body.head, body.head);
+      if (first || body.logs.length) await this.refreshTotals();
+      this.status = 'live';
+      this.error = null;
+    } catch (err) {
+      this.status = 'error';
+      this.error = err.message;
+      this.es?.close();
     }
-    this.records.sort((x, y) => (y.block - x.block) || (y.logIndex - x.logIndex));
-    await this.classifyClaims(pendingClaims);
+    this.notify();
   }
+
+  // The relay serves the complete history since deployment
+  async loadOlder() {}
 
   ingest(log) {
     const key = `${log.transactionHash}:${log.index ?? log.logIndex}`;

@@ -49,6 +49,8 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 | SEC-21 | Medium | Free oracle gateway keeps no past reports: an uncaptured round could only refund after 2 h | ✅ Fixed | `[SEC-21]` | ✅ |
 | SEC-22 | High | Oracle signer set is owner-controlled: an instant swap would let the owner forge prices | ✅ Fixed | `[SEC-22]` | ✅ |
 | SEC-24 | Medium (ops) | Idle markets needed a keeper transaction every minute (~6 MON/hour for 4 markets) | ✅ Fixed | `[SEC-24]` | ✅ |
+| SEC-25 | Medium (cost) | Monad charges the full gas LIMIT: +20%/+30% margins and a 10-slot Round struct overcharged every user and the keeper | ✅ Fixed | `[SEC-25]` (gas budgets) | — |
+| SEC-26 | Medium | "100% refund" ignored network fees, and refunds depended on someone else's transaction | ✅ Fixed | `[SEC-26]` | ✅ |
 | SEC-23 | High (legal) | RedStone's own contract library is BUSL-1.1; free production use of its data is unconfirmed | 🟡 Partial | — | — |
 
 ---
@@ -109,6 +111,10 @@ npm run test:mutation   # re-injects each fixed bug and confirms the regression 
 **Test.** `[SEC-10]`: static source check.
 
 ### SEC-11: Keeper economics (Medium) ⬜
+Measured 2026-09-26 at 102 gwei, after SEC-25: a contested round costs the keeper ~0.048 MON (lock 0.013 + settle 0.036); its reward is 0.1% of the pool, so it breaks even only at ~48 MON per round. The treasury's 1.3% covers that at ~3.7 MON per round, so the protocol as a whole pays its own keeping above that pool size. One-sided rounds now cost the keeper nothing (SEC-26).
+- [ ] Decide: operator-run keeper funded from treasury, and/or a higher keeper share.
+- [ ] Set `minBet` so fees are a small share of a stake (e.g. ≥ 0.5 MON at current gas).
+
 The keeper earns 0.1% of the pool. On small pools that's below gas + Pyth fee, and uncontested rounds pay nothing. Only the team will keep keepers running.
 - [ ] Decide: minimum bounty floor, subsidy from treasury, or longer rounds / fewer markets.
 
@@ -160,6 +166,20 @@ Failures used to be hidden behind substitute values. Each one now fails visibly 
 **Before mainnet.**
 - [ ] Put the owner behind a multisig as well (SEC-16).
 
+### SEC-25: Gas is charged on the limit (Medium, cost) ✅
+**Issue.** Monad charges `gasLimit × price`, not gas used (verified on testnet receipts: fee = limit × price on every transaction). The app added +20% and the keeper +30% to every estimate, so every transaction paid that margin for nothing. Starting a round wrote 10 fresh storage slots (~221k gas), paid by the settling keeper or by the first bettor.
+**Fix.** `Round` packed into 3 fixed slots plus amounts (uint64 timestamps, uint16 bps, uint32 bettor counts). Margins cut to +10%. Measured (`node scripts/gas_report.js`): settle 524k → 331k, bet opening a round 400k → 227k, one-sided cancel 284k → 130k, first bet 153k → 134k, market creation 493k → 339k. Unused duplicate getters and the unbounded `getAllMarkets` removed (size 23.6 KB).
+**Test.** `[SEC-25]` fails if bet, lock, settle, new-round bet or claim exceed their gas budgets.
+
+### SEC-26: Refunds and network fees (Medium) ✅
+**Issue.** The contract and UI promised "100% refunds". The stake is refunded, but the bettor pays network fees to bet and to claim, and those are never refunded: a 0.05 MON bet refunded on testnet cost 0.051 MON in fees. Refunds of one-sided rounds also waited for a keeper's cancel transaction (which the keeper paid for with no fee income), and stuck rounds waited for someone to call `emergencyRefund`.
+**Fix.**
+- A round that can no longer be contested (one side empty after betting closed) or resolved (past close + `emergencyTimeout`) is refundable directly by `claimPayout` / `claimBatch` (`_isRefundable`). No one else's transaction is needed.
+- The next bet on such a one-sided round cancels it and opens a new round (same path as SEC-24); the keeper sends nothing for one-sided rounds.
+- The app shows the network fee to bet and to claim before betting, warns when fees exceed 5% of the stake, offers "Claim all" per market (one fee for many rounds), and blocks bets in the last 3 s (they would likely revert after the cutoff and still cost the fee). Wording now says the stake is refunded and network fees are not.
+**Test.** `[SEC-26]`: no refund while the other side can still bet; full stake refunded directly after betting closes; no double refund, including after the round is later cancelled; contested rounds refundable directly only after the timeout.
+**Residual.** Fees are real money on small stakes. With ~0.02 MON to bet and claim at 102 gwei, the 0.001 MON contract minimum is far below cost; raise `minBet` with `setProtocolParameters` before mainnet (see SEC-11).
+
 ### SEC-23: Oracle licence and terms (High, legal) 🟡
 RedStone's EVM connector package ships its Solidity under **BUSL-1.1** (its package.json says MIT; the licence grant text is not included). We do not use that code: `SignedPriceOracle.sol` is an independent MIT implementation of the public data-package format. Whether RedStone's free gateway data may be used in production without an agreement is **not confirmed**.
 - [x] No RedStone library code in the contracts.
@@ -189,6 +209,7 @@ The contract is not upgradeable. **These fixes require a fresh deployment**, the
 
 | Date | ID(s) | Change |
 |---|---|---|
+| 2026-09-26 | SEC-25, SEC-26, SEC-11 | Raised by the user: refunds are not free once network fees count. Measured real costs on testnet, packed `Round` (−35% to −54% gas on round starts), self-service refunds, fee display and warnings, keeper skips one-sided rounds. Security 70/70, mutations 11/11. |
 | 2026-09-26 | SEC-24 | Idle rounds replaced on the next bet; keeper skips empty rounds. Deployed to Monad testnet at `0x2d983986A906006Fa15479314E6F36cE30550b80` and ran a full round with live RedStone reports (lock, settle, claim). Security 58/58, mutations 10/10. |
 | 2026-09-26 | SEC-01, 02, 21, 22, 23 | Settlement moved from Pyth (API key required since 2026-08-26) to RedStone's free signed reports, verified by our own `SignedPriceOracle.sol`. SEC-01/02 re-proven on the new oracle; added SEC-21/22 with tests and mutations. Suites: invariants 75/75, EVM 42/42 (incl. real RedStone packages on-chain), security 52/52, mutations 9/9 caught. |
 | 2026-09-26 | SEC-19, SEC-20 | Removed silent fallbacks across keeper, deploy, config and UI; bets blocked when the network switch fails. All suites pass (80/80, 33/33, 39/39; 6/6 mutations caught). |

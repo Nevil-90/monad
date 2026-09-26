@@ -2,6 +2,10 @@
  * LivePriceFeed.js
  * Live prices for the UI.
  *
+ * Coinbase (NEXT_PUBLIC_PRICE_SOURCE=coinbase): the chart follows Coinbase's public WebSocket, every
+ * trade in USD with ~0.1 s delay and no API key. The official price that decides rounds is still
+ * RedStone's, streamed from the relay alongside and reported separately (onOfficial).
+ *
  * RedStone, streamed through scripts/price_relay.js (NEXT_PUBLIC_PRICE_RELAY_URL). This is the oracle
  * the contract settles on, and the relay sends the same median of all signers the contract computes,
  * so the price users watch is the price that decides the round. New reports arrive every 10 seconds.
@@ -25,13 +29,14 @@ export class LivePriceFeed {
     return {};
   }
 
-  constructor(onTickCallback, onStatusCallback) {
+  constructor(onTickCallback, onStatusCallback, onOfficialCallback) {
     this.onTick = onTickCallback;
     this.onStatus = onStatusCallback;
+    this.onOfficial = onOfficialCallback;
     this.isConnected = false;
     this.lastTickTime = 0;
     this.latencyMs = null;
-    this.source = { redstone: 'RedStone', binance: 'Binance' }[API_CONFIG.priceSource] || null;
+    this.source = { coinbase: 'Coinbase', redstone: 'RedStone', binance: 'Binance' }[API_CONFIG.priceSource] || null;
     this.prices = {};
     this.stats24h = {};
     for (const k of Object.keys(SUPPORTED_MARKETS)) {
@@ -40,7 +45,10 @@ export class LivePriceFeed {
     }
     this.marketByFeed = new Map(Object.entries(SUPPORTED_MARKETS).map(([k, m]) => [m.feed, k]));
 
-    if (this.source === 'RedStone') this.connectRelay();
+    if (this.source === 'Coinbase') {
+      this.connectCoinbase(0);
+      if (API_CONFIG.priceRelayUrl) this.connectRelay({ officialOnly: true });
+    } else if (this.source === 'RedStone') this.connectRelay();
     else if (this.source === 'Binance') this.connectBinance();
     else {
       // Deferred so listeners wired in the caller's constructor receive it
@@ -62,7 +70,54 @@ export class LivePriceFeed {
   // ---------------------------------------------------------------------------
   // RedStone via relay (Server-Sent Events)
   // ---------------------------------------------------------------------------
-  connectRelay() {
+  // ---------------------------------------------------------------------------
+  // Coinbase public WebSocket (every trade)
+  // ---------------------------------------------------------------------------
+  connectCoinbase(attempt) {
+    const products = Object.entries(SUPPORTED_MARKETS).filter(([, m]) => m.coinbase);
+    const byProduct = new Map(products.map(([k, m]) => [m.coinbase, k]));
+    this.cb = new WebSocket(API_CONFIG.coinbaseWsUrl);
+    this.cb.onopen = () => {
+      attempt = 0;
+      this.cb.send(JSON.stringify({ type: 'subscribe', product_ids: [...byProduct.keys()], channels: ['ticker'] }));
+      this.isConnected = true;
+      this.updateStatus();
+    };
+    let lastStatus = 0;
+    this.cb.onmessage = (event) => {
+      try {
+        const m = JSON.parse(event.data);
+        if (m.type !== 'ticker') return;
+        const k = byProduct.get(m.product_id);
+        const price = parseFloat(m.price);
+        const t = Date.parse(m.time);
+        if (!k || !(price > 0) || !Number.isFinite(t)) return;
+        const open = parseFloat(m.open_24h);
+        if (open > 0) this.stats24h[k] = { change: ((price - open) / open) * 100 };
+        this.prices[k] = price;
+        this.latencyMs = Math.max(0, Date.now() - t);
+        this.dispatchTick(k, price, parseFloat(m.last_size) || 0, t, false);
+        if (Date.now() - lastStatus > 1000) {
+          lastStatus = Date.now();
+          this.updateStatus();
+        }
+      } catch (_) {
+        // Ignore malformed messages
+      }
+    };
+    this.cb.onclose = () => {
+      this.isConnected = false;
+      this.updateStatus();
+      if (this.destroyed) return;
+      setTimeout(() => this.connectCoinbase(attempt + 1), Math.min(15000, 1000 * 2 ** attempt));
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // RedStone via relay (Server-Sent Events). With officialOnly, it only reports the official price.
+  // ---------------------------------------------------------------------------
+  connectRelay({ officialOnly = false } = {}) {
+    this.officialOnly = officialOnly;
     this.es = new EventSource(`${API_CONFIG.priceRelayUrl}/stream`);
 
     const applySnapshot = (e, initial) => {
@@ -71,6 +126,8 @@ export class LivePriceFeed {
         for (const [feed, f] of Object.entries(snap)) {
           const k = this.marketByFeed.get(feed);
           if (!k) continue;
+          if (f.p > 0) this.onOfficial?.(k, f.p, f.t);
+          if (this.officialOnly) continue;
           this.stats24h[k] = { change: f.change24h ?? null };
           if (initial && f.p > 0) {
             this.prices[k] = f.p;
@@ -89,6 +146,8 @@ export class LivePriceFeed {
         const { feed, p, t } = JSON.parse(e.data);
         const k = this.marketByFeed.get(feed);
         if (!k || !(p > 0) || !Number.isFinite(t)) return;
+        this.onOfficial?.(k, p, t);
+        if (this.officialOnly) return;
         this.prices[k] = p;
         this.latencyMs = Math.max(0, Date.now() - t);
         this.dispatchTick(k, p, 0, t, false);
@@ -98,11 +157,13 @@ export class LivePriceFeed {
       }
     };
     this.es.onopen = () => {
+      if (this.officialOnly) return;
       this.isConnected = true;
       this.updateStatus();
     };
     this.es.onerror = () => {
       // EventSource reconnects on its own
+      if (this.officialOnly) return;
       this.isConnected = false;
       this.updateStatus();
     };
@@ -201,6 +262,7 @@ export class LivePriceFeed {
   destroy() {
     this.destroyed = true;
     if (this.es) this.es.close();
+    if (this.cb) this.cb.close();
     if (this.ws) this.ws.close();
     clearInterval(this.watchdog);
   }

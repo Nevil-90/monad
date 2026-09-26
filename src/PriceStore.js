@@ -45,6 +45,28 @@ export class PriceStore {
       }
       return;
     }
+    if (API_CONFIG.priceSource === 'coinbase' && market.coinbase) {
+      try {
+        const base = `${API_CONFIG.coinbaseRestUrl}/products/${market.coinbase}`;
+        const [candles, trades] = await Promise.all([
+          fetch(`${base}/candles?granularity=60`).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); }),
+          fetch(`${base}/trades?limit=1000`).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+        ]);
+        if (token !== this.loadToken) return;
+        const live = { s: this.bars1s, m: this.bars1m };
+        // 1m bars from candles ([time, low, high, open, close, volume], newest first)
+        const m1 = candles.map((c) => ({ t: c[0] * 1000, o: c[3], h: c[2], l: c[1], c: c[4], v: c[5] })).reverse();
+        // 1s bars from the latest trades (newest first)
+        this.bars1s = [];
+        for (const tr of [...trades].reverse()) this.update(this.bars1s, 1000, parseFloat(tr.price), parseFloat(tr.size) || 0, Date.parse(tr.time), MAX_1S);
+        this.bars1m = m1;
+        this.bars1s = this.merge(this.bars1s, live.s);
+        this.bars1m = this.merge(this.bars1m, live.m);
+      } catch (err) {
+        console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
+      }
+      return;
+    }
     let urls;
     let parse;
     if (API_CONFIG.priceSource === 'binance' && market.binanceTradeStream) {

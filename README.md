@@ -5,7 +5,8 @@ One-minute **Rise or Fall** rounds on BTC, ETH, SOL and MON, fully on-chain on M
 Pick a side before betting closes. The price at lock becomes the strike; one minute later the close
 price decides the round. Everyone on the winning side splits the whole pool (less a 1.5% fee) in
 proportion to their stake. If nobody took the other side, or the price closes exactly at the strike,
-every stake is refunded.
+your stake is refunded in full. Network fees for placing and claiming a bet go to Monad and are not
+refundable; the app shows them before you bet.
 
 ## How it uses Monad
 
@@ -51,12 +52,19 @@ Details and residual risks: [SECURITY_FIXES.md](SECURITY_FIXES.md) (SEC-01, 02, 
 ## Live on Monad testnet
 
 `MonadUpDownAMM` is deployed at
-[`0x2d983986A906006Fa15479314E6F36cE30550b80`](https://testnet.monadexplorer.com/address/0x2d983986A906006Fa15479314E6F36cE30550b80)
-with BTC, ETH, SOL and MON markets. A first round was bet, locked and settled on live RedStone reports
-and the winner claimed ([settle tx](https://testnet.monadexplorer.com/tx/0x20ab4528a2224e3e6dc658e5f05f3ece41588760f974217a159d7e8d040cfce8)).
+[`0x69390eAE89d12DA0742Eb7057bef2356C413cD6b`](https://testnet.monadexplorer.com/address/0x69390eAE89d12DA0742Eb7057bef2356C413cD6b)
+with BTC, ETH, SOL and MON markets. Tested end to end in a browser with a real wallet: bets, lock and
+settle on live RedStone reports, winner claims, and self-service refunds of one-sided rounds. An earlier
+deployment's settled round, for reference:
+[settle tx](https://testnet.monadexplorer.com/tx/0x20ab4528a2224e3e6dc658e5f05f3ece41588760f974217a159d7e8d040cfce8).
 
-Idle markets cost nothing: a round nobody bet in is replaced by the next bet, so the keeper only
-sends transactions for rounds that hold bets.
+**Costs are shown, not hidden.** Monad charges the full gas limit of each transaction. The contract keeps
+round starts cheap (packed storage), the app shows the network fee to bet and to claim before you bet,
+warns when fees are a large share of a small stake, and claims many rounds in one transaction.
+`node scripts/gas_report.js` prints the gas of every action.
+
+Idle and one-sided markets cost nothing: such a round is replaced by the next bet, its bettors claim
+their stake back directly, and the keeper only sends transactions for contested rounds.
 
 ## Run it locally
 
@@ -90,8 +98,8 @@ npm run dev:testnet   # relay + keeper + app in one terminal (development)
 ```
 
 The keeper and the relay must run continuously: RedStone's free gateway does not serve past reports,
-so a round's report has to be captured when it is published. A round nobody could resolve is refunded
-in full after 10 minutes.
+so a round's report has to be captured when it is published. If a round can't be resolved, each bettor
+can claim their stake back directly after 10 minutes, without waiting for anyone else.
 
 ## Tests
 

@@ -144,7 +144,8 @@ export class AMMState {
     if (!this.options.skipFeed) {
       this.feed = new LivePriceFeed(
         (tickData) => this.handleLiveTick(tickData),
-        (statusData) => this.handleFeedStatus(statusData)
+        (statusData) => this.handleFeedStatus(statusData),
+        (marketKey, price, time) => this.handleOfficialPrice(marketKey, price, time)
       );
     }
 
@@ -180,6 +181,14 @@ export class AMMState {
       isRealLive: true,
       stats: stats
     });
+  }
+
+  /** The official price (RedStone, what the contract settles on), reported separately from chart ticks */
+  handleOfficialPrice(marketKey, price, time) {
+    const m = this.markets[marketKey];
+    if (!m) return;
+    m.official = { price, time };
+    this.emit('official', { marketKey, market: m });
   }
 
   handleFeedStatus(status) {
@@ -325,7 +334,29 @@ export class AMMState {
     if (this.lifecycleInterval) clearInterval(this.lifecycleInterval);
   }
 
+  /**
+   * Live mode reads rounds from the contract (src/LiveRounds.js), so the in-browser round clock and
+   * simulated pools stop. Returning to Demo starts fresh simulated rounds.
+   */
+  setLiveMode(on) {
+    this.liveMode = on;
+    for (const m of Object.values(this.markets)) {
+      m.lockPrice = null;
+      m.closePrice = null;
+      if (!on) this.seedDemoPools(m);
+      else {
+        m.poolUp = 0;
+        m.poolDown = 0;
+        m.upBettors = 0;
+        m.downBettors = 0;
+      }
+    }
+    if (!on) this.syncAllMarketsToEpoch();
+    this.emit('oddsUpdated', this.getLiveOdds());
+  }
+
   updateTimers(dt) {
+    if (this.liveMode) return;
     const isBrowser = typeof window !== 'undefined';
     const useEpoch = (isBrowser || this.options.useEpochSync) && !this.options.useManualTimer;
 

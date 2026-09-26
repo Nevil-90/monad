@@ -173,7 +173,10 @@ export class Dashboard {
     const dot = this.el('dash-sync-dot');
     dot.className = `sync-dot ${h.status}`;
     if (h.status === 'live') sync.textContent = `Live · block ${fmtInt(h.newest)}`;
-    else if (h.status === 'syncing') sync.textContent = 'Reading contract events…';
+    else if (h.status === 'syncing') {
+      const pr = h.progress;
+      sync.textContent = pr && pr.total ? `Reading Monad blocks… ${Math.round((pr.done / pr.total) * 100)}%` : 'Reading contract events…';
+    }
     else if (h.status === 'error') sync.textContent = h.error || 'Connection problem';
     else sync.textContent = 'Connecting…';
     const link = this.el('dash-contract');

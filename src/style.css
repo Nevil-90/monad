@@ -1074,3 +1074,39 @@ select.dash-input { padding-right: 28px; }
 .console.closing .ring-fill { stroke: var(--horizon); }
 @keyframes closing-pulse { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .console.closing .phase-label { animation: none; } }
+
+/* Dashboard: Demo bets are not on-chain, say so where people look for them */
+.dash-demo-note {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  max-width: 640px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: rgba(131, 110, 249, 0.1);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.dash-demo-note b { color: var(--ink); }
+.link-btn { padding: 0; border: 0; background: none; color: var(--ink); font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+
+/* Official (settlement) price next to the strike */
+.official-age { font-size: 10px; font-weight: 500; color: var(--ink-3); margin-left: 4px; }
+@media (max-width: 720px) {
+  /* One compact row on phones so the chart keeps its height; last rounds stay on larger screens */
+  .strike-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .strike-row .cell-val { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .strike-row .cell-label { font-size: 9px; }
+  .strike-row .official-age { display: none; }
+  .strike-cell:has(#recent-results) { display: none; }
+}
+
+/* Network fee note under the stake (Live mode) */
+.stake-fee { margin: 8px 2px 0; font-size: 11px; color: var(--ink-3); }
+.stake-fee.warn { color: var(--ink); font-weight: 600; }
+.claim-all-btn {
+  display: block; width: 100%; margin: 0 0 10px; padding: 10px 12px;
+  border-radius: 12px; border: 1px solid var(--line-strong);
+  background: rgba(131, 110, 249, 0.14); color: var(--ink); font-weight: 700; cursor: pointer;
+}
+.claim-all-btn:disabled { opacity: 0.5; cursor: default; }

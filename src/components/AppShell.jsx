@@ -78,6 +78,10 @@ export default function AppShell() {
                 <span className="cell-label">Strike</span>
                 <span className="cell-val num" id="strike-val">Sets at lock</span>
               </div>
+              <div className="strike-cell" id="official-cell">
+                <span className="cell-label">Official price</span>
+                <span className="cell-val num" id="official-val" title="RedStone's signed price: the one the contract settles on">—</span>
+              </div>
               <div className="strike-cell">
                 <span className="cell-label">Distance</span>
                 <span className="cell-val num" id="gap-val">—</span>
@@ -144,6 +148,7 @@ export default function AppShell() {
                   <button className="chip" id="stake-max">Max</button>
                   <button className="chip" id="stake-clear" aria-label="Clear stake">×</button>
                 </div>
+                <p className="stake-fee num hidden" id="stake-fee"></p>
                 <div className="tug" aria-label="Pool split">
                   <div className="tug-bar"><span className="tug-up" id="tug-up"></span><span className="tug-down" id="tug-down"></span></div>
                   <div className="tug-labels num">
@@ -200,7 +205,8 @@ export default function AppShell() {
             <header className="dash-head">
               <div>
                 <h1 className="dash-title">Every MON, on the record</h1>
-                <p className="dash-sub">Read directly from the contract's events on Monad. Nothing here comes from a MonadPulse server. Every row links to its transaction so anyone can check it.</p>
+                <p className="dash-sub">Every row is an event emitted by the contract on Monad, indexed by the MonadPulse relay. Each one links to its transaction on the Monad explorer, so anyone can check it, and the totals are read from the contract itself.</p>
+                <p className="dash-demo-note" id="dash-demo-note">You're in <b>Demo</b>: practice bets stay in your browser and never appear here. This page shows real transactions on Monad testnet. <button className="link-btn" id="dash-go-live">Switch to Live</button> to bet with your wallet.</p>
               </div>
               <div className="dash-source">
                 <div className="dash-sync"><span className="sync-dot" id="dash-sync-dot"></span><span id="dash-sync">Connecting…</span></div>
@@ -340,7 +346,7 @@ export default function AppShell() {
               </li>
               <li>
                 <span className="guide-n num">4</span>
-                <div><h3>No contest, no loss</h3><p>If nobody took the other side, or the price closes exactly at the strike, every stake is refunded in full.</p></div>
+                <div><h3>No contest, stake back</h3><p>If nobody took the other side, or the price closes exactly at the strike, your stake is refunded in full. Network fees for placing and claiming a bet are paid to Monad and are not refundable.</p></div>
               </li>
             </ol>
             <p className="guide-note">Prices come from RedStone, the same signed oracle reports the contract settles on. Every bet and payout is public in the Dashboard. Demo uses practice MON and simulated players; Live uses your wallet on Monad.</p>

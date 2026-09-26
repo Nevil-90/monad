@@ -140,7 +140,7 @@ for (let i = 0; i < INITIAL_ROUNDS; i++) {
 }
 
 console.log('\nStart the UI against this chain with:\n');
-console.log(`  NEXT_PUBLIC_RPC_URL=http://127.0.0.1:${PORT} NEXT_PUBLIC_CONTRACT_ADDRESS=${ammAddr} NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK=${deployBlock} NEXT_PUBLIC_LOG_CHUNK_BLOCKS=1000 npm run dev\n`);
+console.log(`  NEXT_PUBLIC_RPC_URL=http://127.0.0.1:${PORT} NEXT_PUBLIC_CONTRACT_ADDRESS=${ammAddr} NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK=${deployBlock} npm run dev\n`);
 console.log('Live activity continues every few seconds. Ctrl+C to stop.');
 
 let busy = false;

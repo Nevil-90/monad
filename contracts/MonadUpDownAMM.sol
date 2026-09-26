@@ -18,7 +18,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
         Open,       // Accepting bets
         Locked,     // Bets frozen, tracking price toward resolution
         Settled,    // Settled with winning side
-        Cancelled   // Uncontested, Tie, or Timeout: Full 100% refunds available
+        Cancelled   // Uncontested, tie or timeout: every stake is refundable in full (network fees are not)
     }
 
     enum Side {
@@ -27,29 +27,35 @@ contract MonadUpDownAMM is SignedPriceOracle {
         Down
     }
 
+    // SEC-25: packed so a new round writes 3 fresh storage slots instead of 10. Starting a round is
+    // paid by the settling keeper or the first bettor, and Monad charges the full gas limit.
     struct Round {
-        uint256 roundId;
-        uint256 startTimestamp;
-        uint256 lockTimestamp;
-        uint256 closeTimestamp;
-        uint256 lockPrice;     // Normalized 36-decimal ultra-precision price
-        uint256 closePrice;    // Normalized 36-decimal ultra-precision price
+        // slot: schedule
+        uint64 roundId;
+        uint64 startTimestamp;
+        uint64 lockTimestamp;
+        uint64 closeTimestamp;
+        // slot: snapshots taken at round start (SEC-05) and pinned report times (SEC-01/02)
+        uint64 betCloseTimestamp;  // betting cutoff (immune to later owner param changes)
+        uint64 lockPublishTime;    // timestamp (s) of the pinned lock report
+        uint64 closePublishTime;   // timestamp (s) of the pinned close report
+        uint16 feeBps;             // protocolTotalFeeBps at round start
+        uint16 creatorFeeBps;
+        uint16 keeperFeeBps;
+        uint16 priceWindow;        // oracle report interval in seconds (prices are pinned to its multiples)
+        // slot: state
+        address lockKeeper;
+        RoundStatus status;
+        Side winningSide;
+        uint32 upBettors;          // distinct wallets on Up this round
+        uint32 downBettors;        // distinct wallets on Down this round
+        // amounts and prices
+        uint256 lockPrice;         // 36-decimal price
+        uint256 closePrice;        // 36-decimal price
         uint256 totalUp;
         uint256 totalDown;
         uint256 totalPool;
-        uint256 netPayoutPool; // Exact net payout pool for winners (Capital Preservation Guaranteed)
-        Side winningSide;
-        RoundStatus status;
-        address lockKeeper;
-        uint256 feeBps;        // Snapshotted protocolTotalFeeBps at round start
-        uint256 creatorFeeBps; // Snapshotted creator fee
-        uint256 keeperFeeBps;  // Snapshotted keeper fee
-        uint256 betCloseTimestamp; // SEC-05: snapshotted betting cutoff (immune to later owner param changes)
-        uint256 priceWindow;       // SEC-05: snapshotted oracle report interval in seconds (prices are pinned to its multiples)
-        uint256 lockPublishTime;   // SEC-01/02: timestamp (s) of the pinned lock report
-        uint256 closePublishTime;  // SEC-01/02: timestamp (s) of the pinned close report
-        uint256 upBettors;         // Distinct wallets on Up this round
-        uint256 downBettors;       // Distinct wallets on Down this round
+        uint256 netPayoutPool;     // exact net payout pool for winners
     }
 
     struct UserBet {
@@ -215,14 +221,6 @@ contract MonadUpDownAMM is SignedPriceOracle {
         emit ProtocolParametersUpdated(_lockBuffer, _priceWindow, _emergencyTimeout, _minBet);
     }
 
-    // Public view accessors for backward-compatibility with tests & external contracts
-    function PROTOCOL_TOTAL_FEE_BPS() external view returns (uint256) { return protocolTotalFeeBps; }
-    function CREATOR_FEE_BPS() external view returns (uint256) { return creatorFeeBps; }
-    function KEEPER_FEE_BPS() external view returns (uint256) { return keeperFeeBps; }
-    function TREASURY_FEE_BPS() external view returns (uint256) { return treasuryFeeBps; }
-    function LOCK_BUFFER_SECONDS() external view returns (uint256) { return lockBufferSeconds; }
-    function EMERGENCY_TIMEOUT() external view returns (uint256) { return emergencyTimeout; }
-    function MIN_BET() external view returns (uint256) { return minBet; }
 
     // =========================================================================
     // ADMIN: PAUSE, MARKET CURATION (SEC-06, SEC-08)
@@ -328,20 +326,21 @@ contract MonadUpDownAMM is SignedPriceOracle {
         uint256 close = lock + market.roundDuration;
 
         Round storage round = rounds[marketId][newRoundId];
-        round.roundId = newRoundId;
-        round.startTimestamp = start;
-        round.lockTimestamp = lock;
-        round.closeTimestamp = close;
+        round.roundId = uint64(newRoundId);
+        round.startTimestamp = uint64(start);
+        round.lockTimestamp = uint64(lock);
+        round.closeTimestamp = uint64(close);
         round.status = RoundStatus.Open;
-        round.feeBps = protocolTotalFeeBps;
-        round.creatorFeeBps = creatorFeeBps;
-        round.keeperFeeBps = keeperFeeBps;
+        // Fees are capped at 1000 bps by setProtocolFees, so they fit uint16
+        round.feeBps = uint16(protocolTotalFeeBps);
+        round.creatorFeeBps = uint16(creatorFeeBps);
+        round.keeperFeeBps = uint16(keeperFeeBps);
 
         // SEC-05: snapshot timing and clamp to half the duration so betting always has a window
         // and the lock/close price windows can never overlap.
         uint256 half = market.roundDuration / 2;
-        round.betCloseTimestamp = lock - (lockBufferSeconds < half ? lockBufferSeconds : half);
-        round.priceWindow = priceWindowSeconds < half ? priceWindowSeconds : half;
+        round.betCloseTimestamp = uint64(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));
+        round.priceWindow = uint16(priceWindowSeconds < half ? priceWindowSeconds : half);
 
         emit RoundStarted(marketId, newRoundId, lock, close);
     }
@@ -388,17 +387,17 @@ contract MonadUpDownAMM is SignedPriceOracle {
 
         Round storage round = rounds[marketId][roundId];
 
-        // Idle markets cost nothing: a current round whose betting window passed with no bets at all is
-        // replaced by a fresh round on the next bet, instead of a keeper rolling empty rounds every
-        // minute. No funds are involved (the old round's pool is zero).
+        // Idle markets cost nothing (SEC-24/26): a current round whose betting window passed while one
+        // side (or both) stayed empty can never be contested, so the next bet cancels it and opens a
+        // fresh round, instead of a keeper paying to roll it. Its bettors, if any, claim full refunds.
         if (
             roundId == market.currentRoundId &&
             round.status == RoundStatus.Open &&
-            round.totalPool == 0 &&
+            (round.totalUp == 0 || round.totalDown == 0) &&
             block.timestamp > round.betCloseTimestamp
         ) {
             round.status = RoundStatus.Cancelled;
-            emit RoundCancelled(marketId, roundId, "Idle round replaced by a new round");
+            emit RoundCancelled(marketId, roundId, round.totalPool == 0 ? "Idle round replaced by a new round" : "Uncontested pool: opposite side has zero liquidity");
             roundId = _startRound(marketId);
             round = rounds[marketId][roundId];
         }
@@ -469,7 +468,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
             (uint256 price, uint256 publishTime) =
                 _pinnedPrice(markets[marketId].feedId, reports, round.lockTimestamp, round.priceWindow);
             round.lockPrice = price;
-            round.lockPublishTime = publishTime;
+            round.lockPublishTime = uint64(publishTime);
             round.lockKeeper = msg.sender; // Record keeper for bounty split
             round.status = RoundStatus.Locked;
             emit RoundLocked(marketId, roundId, price);
@@ -497,7 +496,7 @@ contract MonadUpDownAMM is SignedPriceOracle {
         require(publishTime > round.lockPublishTime, "Close price not after lock price");
 
         round.closePrice = price;
-        round.closePublishTime = publishTime;
+        round.closePublishTime = uint64(publishTime);
 
         if (price == round.lockPrice) {
             // Genuine tie between two distinct, pinned observations: 100% refund
@@ -641,15 +640,13 @@ contract MonadUpDownAMM is SignedPriceOracle {
         require(!userBet.claimed, "Already claimed");
 
         Round storage round = rounds[marketId][roundId];
-        require(
-            round.status == RoundStatus.Settled || round.status == RoundStatus.Cancelled,
-            "Round not yet resolved"
-        );
+        bool refund = _isRefundable(round);
+        require(refund || round.status == RoundStatus.Settled, "Round not yet resolved");
 
         userBet.claimed = true;
         uint256 payout = 0;
 
-        if (round.status == RoundStatus.Cancelled) {
+        if (refund) {
             // 100% Full refund with 0 fee deduction
             payout = userBet.amount;
         } else if (round.status == RoundStatus.Settled) {
@@ -677,11 +674,12 @@ contract MonadUpDownAMM is SignedPriceOracle {
             if (userBet.amount == 0 || userBet.claimed) continue;
             
             Round storage round = rounds[marketId][rId];
-            if (round.status != RoundStatus.Settled && round.status != RoundStatus.Cancelled) continue;
-            
+            bool refund = _isRefundable(round);
+            if (!refund && round.status != RoundStatus.Settled) continue;
+
             userBet.claimed = true;
             uint256 payout = 0;
-            if (round.status == RoundStatus.Cancelled) {
+            if (refund) {
                 payout = userBet.amount;
             } else if (round.status == RoundStatus.Settled) {
                 if (userBet.side != round.winningSide) continue;
@@ -697,6 +695,22 @@ contract MonadUpDownAMM is SignedPriceOracle {
         require(totalPayout > 0, "No payout due across batch");
         (bool success, ) = payable(msg.sender).call{value: totalPayout}("");
         require(success, "Transfer failed");
+    }
+
+    /**
+     * @dev SEC-26: a refund never waits for anyone else's transaction. Besides cancelled rounds, a
+     * round that can no longer be contested (one side empty once betting closed) or can no longer be
+     * resolved (past closeTimestamp + emergencyTimeout) is refundable directly.
+     */
+    function _isRefundable(Round storage round) internal view returns (bool) {
+        if (round.status == RoundStatus.Cancelled) return true;
+        if (round.status == RoundStatus.Open && block.timestamp > round.betCloseTimestamp && (round.totalUp == 0 || round.totalDown == 0)) {
+            return true;
+        }
+        if ((round.status == RoundStatus.Open || round.status == RoundStatus.Locked) && block.timestamp > round.closeTimestamp + emergencyTimeout) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -718,15 +732,6 @@ contract MonadUpDownAMM is SignedPriceOracle {
     // =========================================================================
     // 100% ON-CHAIN STATE GETTERS (ZERO DATABASE NEEDED)
     // =========================================================================
-
-    function getAllMarkets() external view returns (Market[] memory) {
-        uint256 count = allMarketIds.length;
-        Market[] memory result = new Market[](count);
-        for (uint256 i = 0; i < count; i++) {
-            result[i] = markets[allMarketIds[i]];
-        }
-        return result;
-    }
 
     function getMarketCount() external view returns (uint256) {
         return allMarketIds.length;

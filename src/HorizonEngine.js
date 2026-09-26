@@ -129,6 +129,18 @@ export class HorizonEngine {
 
   setRound({ remaining, duration, lockBuffer, phase }) {
     this.round = { remaining, duration, lockBuffer, phase, syncedAt: performance.now() };
+    this.liveGates = null;
+  }
+
+  /**
+   * Live mode: the contract's own moments (ms since epoch). Gates are drawn at these exact times
+   * instead of the Demo round clock.
+   */
+  setLiveRound({ betCloseAt, lockAt, closeAt, phase, duration }) {
+    const now = Date.now();
+    this.liveGates = { betCloseAt, lockAt, closeAt, phase };
+    const remaining = Math.max(0, (closeAt - now) / 1000);
+    this.round = { remaining, duration, lockBuffer: 0, phase: phase === 'locked' || phase === 'settling' ? 'locked' : 'open', syncedAt: performance.now() };
   }
 
   setPools(up, down) {
@@ -630,6 +642,7 @@ export class HorizonEngine {
   }
 
   drawGates(ctx, F, xAt, now, remaining) {
+    if (this.liveGates) return this.drawLiveGates(ctx, F, xAt, now);
     const settleAt = now + remaining * 1000;
     const lockAt = settleAt - this.round.lockBuffer * 1000;
     const secs = (t) => `${Math.max(0, Math.ceil((t - now) / 1000))}s`;
@@ -656,6 +669,29 @@ export class HorizonEngine {
     if (showLock) gate(lockX, together ? null : `BETS CLOSE ${secs(lockAt)}`, 0.25);
     gate(settleX, together ? `CLOSE ${secs(lockAt)} · SETTLE ${secs(settleAt)}` : `SETTLES ${secs(settleAt)}`,
       this.round.phase === 'locked' ? 0.55 : 0.3);
+  }
+
+  drawLiveGates(ctx, F, xAt, now) {
+    const { betCloseAt, lockAt, closeAt, phase } = this.liveGates;
+    if (phase === 'idle' || phase === 'ended') return;
+    const secs = (t) => `${Math.max(0, Math.ceil((t - now) / 1000))}s`;
+    const gate = (t, label, alpha) => {
+      const x = xAt(t);
+      if (x < F.x0 || x > F.x1) return;
+      ctx.save();
+      ctx.strokeStyle = rgba(COLORS.ink, alpha);
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath(); ctx.moveTo(x, F.plotTop); ctx.lineTo(x, F.volBottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = `600 9px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = rgba(COLORS.ink, Math.min(1, alpha + 0.4));
+      ctx.fillText(label, x, F.plotTop - 6);
+      ctx.restore();
+    };
+    if (phase === 'open') gate(betCloseAt, `BETS CLOSE ${secs(betCloseAt)}`, 0.25);
+    if (phase === 'open' || phase === 'closed') gate(lockAt, `STRIKE ${secs(lockAt)}`, 0.35);
+    gate(closeAt, phase === 'settling' ? 'SETTLING' : `SETTLES ${secs(closeAt)}`, phase === 'locked' || phase === 'settling' ? 0.55 : 0.3);
   }
 
   drawEntry(ctx, x, y, pos) {

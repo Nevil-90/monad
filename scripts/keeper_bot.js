@@ -18,6 +18,7 @@ import { ethers } from 'ethers';
 import { ENVIRONMENTS, SUPPORTED_MARKETS } from '../src/config.js';
 import { AMM_ABI } from '../src/contracts/AMMAbi.js';
 import { ReportArchive } from './lib/report_archive.js';
+import { MonadRpcProvider } from '../src/rpc.js';
 
 const args = process.argv.slice(2);
 const arg = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
@@ -49,7 +50,7 @@ console.log(`[KEEPER] RPC ${config.rpcUrl} | AMM ${config.contractAddress}`);
 
 class Keeper {
   constructor() {
-    this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
+    this.provider = new MonadRpcProvider(config.rpcUrl, config.chainId);
     this.wallet = privateKey ? new ethers.Wallet(privateKey, this.provider) : null;
     this.amm = new ethers.Contract(config.contractAddress, AMM_ABI, this.wallet || this.provider);
     this.startedAt = Date.now();
@@ -91,7 +92,8 @@ class Keeper {
     }
     const before = await this.amm.keeperRewards(this.wallet.address);
     const est = await fn.estimateGas(...callArgs);
-    const rcpt = await (await fn(...callArgs, { gasLimit: (est * 130n) / 100n })).wait();
+    // Monad charges the full gas limit, so the margin stays small (SEC-25)
+    const rcpt = await (await fn(...callArgs, { gasLimit: (est * 110n) / 100n })).wait();
     const earned = (await this.amm.keeperRewards(this.wallet.address)) - before;
     this.stats.gasSpentWei += rcpt.fee;
     this.stats[{ LOCK: 'locked', SETTLE: 'settled', REFUND: 'refunded' }[label]]++;
@@ -111,17 +113,19 @@ class Keeper {
     // so idle markets cost the keeper nothing.
     if (round.totalPool === 0n) return;
 
-    // A round nobody could resolve: refund it so the market moves on (anyone may call this)
-    if ((status === 1 || status === 2) && now > Number(round.closeTimestamp) + this.emergencyTimeout) {
+    // A contested round nobody could resolve: cancel it so the market moves on. Its bettors can also
+    // refund directly (SEC-26); this only restarts the market.
+    const contested = round.totalUp > 0n && round.totalDown > 0n;
+    if (contested && (status === 1 || status === 2) && now > Number(round.closeTimestamp) + this.emergencyTimeout) {
       return this.send('REFUND', 'emergencyRefund', market, rId);
     }
 
     let method;
     let reportTs;
     if (status === 1 && now >= Number(round.lockTimestamp)) {
-      if (round.totalUp === 0n || round.totalDown === 0n) {
-        return this.send('LOCK', 'lockRoundWithUpdate', market, rId, []); // uncontested: cancel, no price
-      }
+      // One-sided: nothing to decide. Bettors refund directly and the next bet opens a new round
+      // (SEC-26), so the keeper spends nothing here.
+      if (round.totalUp === 0n || round.totalDown === 0n) return;
       method = 'lockRoundWithUpdate';
       reportTs = Number(await this.amm.lockReportTimestamp(market.marketId, rId));
     } else if (status === 2 && now >= Number(round.closeTimestamp)) {

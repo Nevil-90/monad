@@ -54,10 +54,17 @@ const MUTATIONS = [
   },
   {
     id: 'SEC-24',
-    name: 'Replace any expired round on a late bet, even one holding bets',
-    from: '            round.totalPool == 0 &&\n',
+    name: 'Replace any expired round on a late bet, even a contested one',
+    from: '            (round.totalUp == 0 || round.totalDown == 0) &&\n',
     to: '',
     expect: ['SEC-24']
+  },
+  {
+    id: 'SEC-26',
+    name: 'One-sided rounds refundable only after someone cancels them',
+    from: 'if (round.status == RoundStatus.Open && block.timestamp > round.betCloseTimestamp && (round.totalUp == 0 || round.totalDown == 0)) {\n            return true;\n        }',
+    to: '',
+    expect: ['SEC-26']
   },
   {
     id: 'SEC-03',
@@ -71,7 +78,7 @@ const MUTATIONS = [
     name: 'Use the live lockBufferSeconds instead of the per-round snapshot',
     from: 'block.timestamp <= round.betCloseTimestamp,',
     to: 'block.timestamp <= round.lockTimestamp - lockBufferSeconds,',
-    extra: [['round.betCloseTimestamp = lock - (lockBufferSeconds < half ? lockBufferSeconds : half);', 'round.betCloseTimestamp = lock - lockBufferSeconds;']],
+    extra: [['round.betCloseTimestamp = uint64(lock - (lockBufferSeconds < half ? lockBufferSeconds : half));', 'round.betCloseTimestamp = uint64(lock - lockBufferSeconds);']],
     expect: ['SEC-05']
   },
   {
