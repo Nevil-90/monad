@@ -1,6 +1,7 @@
 /**
  * scripts/multi_wallet_test.js
- * End-to-end check on the deployed contract with several real wallets, as separate users would play.
+ * End-to-end check on the deployed contract with several real wallets, as separate users would play:
+ * 8 wallets betting at the same moment on both sides, one adding to its bet and trying to switch sides.
  *
  *  1. Creates player wallets (keys in data/test-wallets.json, git-ignored) and funds them from
  *     KEEPER_PRIVATE_KEY's wallet.
@@ -23,7 +24,7 @@ import { AMM_ABI } from '../src/contracts/AMMAbi.js';
 import { MonadRpcProvider } from '../src/rpc.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PLAYERS = 5;
+const PLAYERS = 8;
 const FUND_EACH = ethers.parseEther('3.2');
 const cfg = getConfig();
 if (!cfg.contractAddress || !process.env.KEEPER_PRIVATE_KEY) {
@@ -61,9 +62,9 @@ async function fund() {
 // Scenario: side per player for each market ('UP' / 'DOWN'), stakes in MON
 const PLAN = {
   // Stakes at or above the deployed minBet (0.42 MON at 102 gwei, SEC-11)
-  BTC: [['UP', '0.80'], ['DOWN', '0.50'], ['UP', '0.60'], ['DOWN', '0.90'], ['UP', '0.45']],
-  ETH: [['DOWN', '0.90'], ['UP', '0.50'], ['DOWN', '0.45'], ['UP', '0.70'], ['DOWN', '0.50']],
-  SOL: [['UP', '0.50'], ['UP', '0.45'], ['UP', '0.60'], null, null] // one-sided: must refund
+  BTC: [['UP', '0.80'], ['DOWN', '0.50'], ['UP', '0.60'], ['DOWN', '0.90'], ['UP', '0.45'], ['DOWN', '0.70'], ['UP', '0.55'], ['DOWN', '0.45']],
+  ETH: [['DOWN', '0.90'], ['UP', '0.50'], ['DOWN', '0.45'], ['UP', '0.70'], ['DOWN', '0.50'], ['UP', '0.60'], ['UP', '0.45'], ['DOWN', '0.65']],
+  SOL: [['UP', '0.50'], ['UP', '0.45'], ['UP', '0.60'], null, null, null, null, null] // one-sided: must refund
 };
 
 /**
@@ -83,26 +84,48 @@ async function currentBettableRound(marketId) {
   }
 }
 
+const betOnce = async (player, marketId, roundId, side, amount) => {
+  const c = amm.connect(players[player]);
+  const rc = await (await (side === 'UP' ? c.betUp : c.betDown)(marketId, roundId, { value: ethers.parseEther(amount) })).wait();
+  const ev = rc.logs.map((l) => { try { return amm.interface.parseLog(l); } catch (_) { return null; } }).find((e) => e?.name === 'BetPlaced');
+  return { roundId: ev.args.roundId, block: rc.blockNumber };
+};
+
 async function placeBets() {
   const placed = {};
   for (const [key, plan] of Object.entries(PLAN)) {
     const marketId = SUPPORTED_MARKETS[key].marketId;
-    let roundId = await currentBettableRound(marketId);
+    const asked = await currentBettableRound(marketId);
     placed[key] = { marketId, bets: [] };
-    log(`${key}: betting into round ${roundId}`);
-    for (let i = 0; i < players.length; i++) {
-      if (!plan[i]) continue;
-      const [side, amount] = plan[i];
-      const c = amm.connect(players[i]);
-      const tx = await (side === 'UP' ? c.betUp : c.betDown)(marketId, roundId, { value: ethers.parseEther(amount) });
-      const rc = await tx.wait();
-      // The first bet may have replaced an expired round (SEC-24/26): read where it landed
-      const ev = rc.logs.map((l) => { try { return amm.interface.parseLog(l); } catch (_) { return null; } }).find((e) => e?.name === 'BetPlaced');
-      roundId = ev.args.roundId;
-      placed[key].bets.push({ player: i, side, amount: ethers.parseEther(amount), roundId });
-    }
+    const entries = plan.map((b, i) => (b ? { player: i, side: b[0], amount: b[1] } : null)).filter(Boolean);
+    // The first bet may replace an expired round (SEC-24/26); it fixes the round everyone else joins
+    const first = await betOnce(entries[0].player, marketId, asked, entries[0].side, entries[0].amount);
+    const roundId = first.roundId;
+    // Everyone else bets at the same moment, as a crowd would: same round, often the same block
+    const rest = await Promise.all(entries.slice(1).map((e) => betOnce(e.player, marketId, roundId, e.side, e.amount)));
+    const blocks = new Set([first.block, ...rest.map((x) => x.block)]);
+    check(rest.every((x) => x.roundId === roundId), `${key}: ${entries.length} wallets' bets, ${entries.length - 1} sent at once, all landed in round ${roundId} (${blocks.size} blocks)`);
+    for (const e of entries) placed[key].bets.push({ player: e.player, side: e.side, amount: ethers.parseEther(e.amount), roundId });
     placed[key].roundId = roundId;
-    log(`${key}: ${placed[key].bets.length} bets in round ${roundId}`);
+
+    if (key === 'BTC') {
+      // A wallet adds to its bet on the same side; its payout must count both stakes
+      const top = await betOnce(0, marketId, roundId, entries[0].side, '0.45');
+      placed[key].bets.push({ player: 0, side: entries[0].side, amount: ethers.parseEther('0.45'), roundId: top.roundId });
+      const ub = await amm.userBets(marketId, roundId, players[0].address);
+      check(ub.amount === ethers.parseEther('1.25'), `BTC: player 0 added a second bet on the same side (stake now ${ethers.formatEther(ub.amount)} MON)`);
+      // ...and cannot switch sides in the same round
+      const other = entries[0].side === 'UP' ? 'betDown' : 'betUp';
+      let reason = null;
+      try { await amm.connect(players[0])[other].staticCall(marketId, roundId, { value: ethers.parseEther('0.45') }); } catch (err) { reason = err.reason || err.shortMessage; }
+      check(/opposing sides/.test(reason || ''), `BTC: player 0 cannot also bet the other side (${reason})`);
+    }
+    const r = await amm.rounds(marketId, roundId);
+    const ups = new Set(entries.filter((e) => e.side === 'UP').map((e) => e.player)).size;
+    const downs = new Set(entries.filter((e) => e.side === 'DOWN').map((e) => e.player)).size;
+    check(Number(r.upBettors) === ups && Number(r.downBettors) === downs, `${key}: contract counts ${r.upBettors} wallets on Rise, ${r.downBettors} on Fall (each wallet once)`);
+    const staked = placed[key].bets.reduce((a, b) => a + b.amount, 0n);
+    check(r.totalPool === staked, `${key}: pool ${ethers.formatEther(r.totalPool)} MON = sum of all stakes`);
   }
   return placed;
 }
