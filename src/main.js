@@ -918,7 +918,9 @@ export function startApp() {
   const amm = new MarketState({
     tick: ({ market, isActiveMarket, price, allMarkets, vol }) => {
       if (isActiveMarket) {
-        bootStep('prices');
+        // The chart draws only once history has loaded: keep the boot screen up until then, so a
+        // refresh never shows the empty canvas between the loader and the first frame
+        if (!engine.store.loading) bootStep('prices');
         engine.pushTick(price, vol || 0);
         const now = performance.now();
         if (now - lastHeroPaint >= 80) {

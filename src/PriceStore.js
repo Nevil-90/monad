@@ -13,6 +13,7 @@ const MAX_1M = 1000;
 const MAX_FILL = 720; // flat candles per gap: 1 hour of 5 s candles
 const TRADE_HISTORY_MS = 25 * 60e3; // what the 15s view shows
 const MAX_TRADE_PAGES = 25;
+const BACKFILL_BUDGET_MS = 6000; // the chart waits at most this long for older pages, then draws what it has
 
 export class PriceStore {
   constructor() {
@@ -59,10 +60,11 @@ export class PriceStore {
         this.bars1s = this.merge(this.bars1s, live.s);
         this.bars1m = this.merge(this.bars1m, live.m);
         // The 5s and 15s views are built from trades; 1000 trades cover only minutes on busy markets.
-        // Load older pages in the background until the 15s view is covered, so every timeframe shows
-        // its full window (bounded, one-off; not polling)
+        // Load older pages until the 15s view is covered, so every timeframe shows its full window
+        // (bounded, one-off; not polling). Awaited so the chart stays in its loading state and draws
+        // the full history at once instead of growing leftwards page by page.
         const oldestId = trades.length ? Math.min(...trades.map((t) => t.trade_id)) : null;
-        if (oldestId !== null) this.backfillTrades(base, oldestId, token);
+        if (oldestId !== null) await this.backfillTrades(base, oldestId, token);
       } catch (err) {
         console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
       }
@@ -94,8 +96,9 @@ export class PriceStore {
 
   async backfillTrades(base, beforeId, token) {
     const want = Date.now() - TRADE_HISTORY_MS;
+    const deadline = Date.now() + BACKFILL_BUDGET_MS;
     for (let page = 0; page < MAX_TRADE_PAGES; page++) {
-      if (token !== this.loadToken) return;
+      if (token !== this.loadToken || Date.now() > deadline) return;
       if (this.bars1s.length && this.bars1s[0].t <= want) return;
       let trades;
       try {

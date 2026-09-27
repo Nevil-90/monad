@@ -407,11 +407,28 @@ export class Web3Manager {
     return '0x' + gasLimitWithBuffer.toString(16);
   }
 
+  isUserRejection(err) {
+    const code = err?.code ?? err?.info?.error?.code ?? err?.error?.code;
+    return code === 4001 || code === 'ACTION_REJECTED';
+  }
+
+  /** Readable reason for a failed send: wallet cancel/codes, or the revert reason from estimateGas */
+  txError(err) {
+    const name = this.walletInfo?.name || 'your wallet';
+    if (err?.code === undefined && err?.message) return err.message; // our own Error from estimateGasWithBuffer
+    // Some wallets reject with an empty object: no code, no message
+    if (err?.code === undefined && !err?.shortMessage) return `Not sent: cancelled or rejected in ${name}.`;
+    return Web3Manager.walletError(err, name);
+  }
+
   revertReason(err) {
     const data = err?.data?.data ?? err?.data ?? err?.error?.data;
     if (typeof data === 'string' && data.startsWith('0x') && data.length > 2) {
       try {
         const parsed = this.iface.parseError(data);
+        // require("...") reverts decode as the built-in Error(string): show the message, not "Error"
+        if (parsed?.name === 'Error') return `The contract rejected this: ${parsed.args[0]}`;
+        if (parsed?.name === 'Panic') return `The contract rejected this: internal check failed (panic 0x${parsed.args[0].toString(16)})`;
         if (parsed) return `The contract rejected this: ${parsed.name}`;
       } catch (_) {
         // Not a custom error of this contract; try a revert string
@@ -472,9 +489,11 @@ export class Web3Manager {
       this.emit('txSuccess', { txHash, side, amount: amountMon });
       return { success: true, txHash };
     } catch (err) {
-      console.error('Transaction rejected or failed:', err);
-      this.emit('txError', err.message);
-      return { success: false, error: err.message || 'Transaction rejected by user' };
+      // A cancel in the wallet is a normal choice, not a failure: no console error for it
+      const error = this.txError(err);
+      if (!this.isUserRejection(err)) console.warn('Bet not sent:', error);
+      this.emit('txError', error);
+      return { success: false, error };
     }
   }
 
@@ -498,7 +517,7 @@ export class Web3Manager {
       });
       return { success: true, txHash };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: this.txError(err) };
     }
   }
 
@@ -522,7 +541,7 @@ export class Web3Manager {
       });
       return { success: true, txHash };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: this.txError(err) };
     }
   }
 
@@ -546,7 +565,7 @@ export class Web3Manager {
       });
       return { success: true, txHash };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: this.txError(err) };
     }
   }
 
@@ -570,7 +589,7 @@ export class Web3Manager {
       });
       return { success: true, txHash };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: this.txError(err) };
     }
   }
 
@@ -595,7 +614,7 @@ export class Web3Manager {
       });
       return { success: true, txHash };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: this.txError(err) };
     }
   }
 
