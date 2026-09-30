@@ -28,7 +28,7 @@ services:
   keeper:
     build: { context: .., dockerfile: deploy/Dockerfile }
     restart: unless-stopped
-    command: ["node", "scripts/keeper_bot.js", "--mode", "live", "--network", "testnet"]
+    command: ["node", "scripts/house_keeper.js", "--mode", "live", "--network", "testnet"]
     environment:
       NEXT_PUBLIC_CONTRACT_ADDRESS: ${NEXT_PUBLIC_CONTRACT_ADDRESS}
       NEXT_PUBLIC_CHAIN_ID: ${NEXT_PUBLIC_CHAIN_ID:-10143}

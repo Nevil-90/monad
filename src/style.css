@@ -292,25 +292,40 @@ button:disabled { cursor: not-allowed; }
   bottom: calc(var(--console-h, 200px) + 40px);
   left: 50%;
   transform: translateX(-50%);
-  white-space: nowrap;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  width: max-content;
+  max-width: min(980px, calc(100vw - 2 * var(--gutter)));
+}
+.bet-pill {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  max-width: min(420px, calc(100vw - 2 * var(--gutter)));
-  padding: 10px 16px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 6px 12px;
   border-radius: 999px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   background: var(--glass);
   border: 1px solid var(--line-strong);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
-.position-chip.winning.up { border-color: rgba(var(--sun-rgb), 0.6); box-shadow: 0 0 28px -8px rgba(var(--sun-rgb), 0.6); }
-.position-chip.winning.down { border-color: rgba(var(--tide-rgb), 0.6); box-shadow: 0 0 28px -8px rgba(var(--tide-rgb), 0.6); }
-.position-glyph { font-size: 11px; }
-.position-chip.up .position-glyph { color: var(--sun); }
-.position-chip.down .position-glyph { color: var(--tide); }
+.bet-pill .num { font-family: var(--font-num); }
+.bet-pill .position-glyph { font-size: 11px; }
+.bet-pill.up .position-glyph { color: var(--sun); }
+.bet-pill.down .position-glyph { color: var(--tide); }
+.bet-pill.winning.up { border-color: rgba(var(--sun-rgb), 0.6); box-shadow: 0 0 28px -8px rgba(var(--sun-rgb), 0.6); }
+.bet-pill.winning.down { border-color: rgba(var(--tide-rgb), 0.6); box-shadow: 0 0 28px -8px rgba(var(--tide-rgb), 0.6); }
+.bet-pill.won { border-color: rgba(var(--sun-rgb), 0.8); color: var(--sun-hi); }
+.bet-pill.lost { opacity: 0.6; }
+.bet-pill.back { border-color: var(--line-strong); }
+.bet-pill.more { padding: 4px 12px; font-size: 11px; color: var(--ink-3); }
 
 .result {
   position: absolute;
@@ -491,6 +506,8 @@ button:disabled { cursor: not-allowed; }
 .side-btn.fall:not(:disabled):hover { box-shadow: 0 0 0 1px var(--tide), 0 18px 50px -18px rgba(var(--tide-rgb), 0.7); }
 .side-btn:not(:disabled):active { transform: translateY(0) scale(0.99); }
 .side-btn:disabled { opacity: 0.35; }
+.side-btn.waiting:disabled { opacity: 1; animation: waiting-pulse 1.2s ease-in-out infinite; }
+@keyframes waiting-pulse { 50% { filter: brightness(1.35); } }
 .side-btn.bet-pop { animation: side-pulse 0.6s var(--ease); }
 @keyframes side-pulse { 50% { transform: scale(1.03); } }
 
@@ -521,7 +538,7 @@ button:disabled { cursor: not-allowed; }
 .rise .side-players::before { content: '▲ '; color: var(--sun); }
 .fall .side-players::before { content: '▼ '; color: var(--tide); }
 
-.stake { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.stake { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; min-width: 0; }
 .stake-label { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); text-align: center; }
 .stake-field {
   display: flex;
@@ -562,18 +579,49 @@ button:disabled { cursor: not-allowed; }
 }
 .chip:hover { color: var(--ink); border-color: var(--line-strong); }
 
-.tug-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--night-2); gap: 2px; }
-.tug-up { background: linear-gradient(90deg, var(--sun-lo), var(--sun)); transition: width 0.6s var(--ease); }
-.tug-down { background: linear-gradient(90deg, var(--tide), var(--tide-lo)); transition: width 0.6s var(--ease); }
-.tug-labels { display: flex; justify-content: space-between; margin-top: 6px; font-size: 10px; color: var(--ink-3); }
-#tug-up-label { color: var(--sun); }
-#tug-down-label { color: var(--tide); }
+.chip:disabled { opacity: 0.4; cursor: default; }
+/* Rise / Fall balance of the window a bet joins */
+.lean { display: flex; align-items: center; gap: 8px; }
+.lean-bar { flex: 1; min-width: 80px; display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--night-2); gap: 2px; }
+.lean-up { background: linear-gradient(90deg, var(--sun-lo), var(--sun)); transition: width 0.5s var(--ease); }
+.lean-down { background: linear-gradient(90deg, var(--tide), var(--tide-lo)); transition: width 0.5s var(--ease); }
+.lean-label { font-size: 10px; color: var(--ink-3); white-space: nowrap; }
+/* Bet length and in-game balance */
+.bet-opts { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px; }
+.dur { display: flex; gap: 3px; }
+.dur-btn {
+  width: 42px; padding: 4px 0; border-radius: 8px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-3);
+  font-family: var(--font-num); font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.dur-btn:hover { color: var(--ink); border-color: var(--line-strong); }
+.dur-btn.active { color: var(--ink); border-color: var(--monad); background: rgba(131, 110, 249, 0.16); }
+.bank { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.bank-label { font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; font-size: 9px; }
+.bank-val { color: var(--ink-2); font-weight: 600; }
+.bank.has-balance .bank-val { color: var(--sun-hi); }
+#stake-input.flash { animation: stake-flash 0.6s ease-out; }
+@keyframes stake-flash { from { color: var(--sun-hi); text-shadow: 0 0 18px rgba(var(--sun-rgb), 0.8); } }
+.bank-btn { flex: 0 0 auto; padding: 3px 8px; font-size: 10px; }
+/* Streak dots toward the jackpot */
+.cell-val.streak { display: inline-flex; align-items: center; gap: 4px; }
+.cell-val.streak i { width: 8px; height: 8px; border-radius: 50%; background: var(--night-2); border: 1px solid var(--line-strong); }
+.cell-val.streak i.lit { background: var(--sun); border-color: var(--sun-hi); box-shadow: 0 0 10px rgba(var(--sun-rgb), 0.7); }
+.cell-val.streak span { margin-left: 4px; font-size: 12px; color: var(--ink-3); }
+/* Vault (Be the house) */
+.lp-form { display: flex; gap: 6px; margin-top: 10px; }
+.lp-form input { flex: 1; min-width: 0; }
+.feed-item.jackpot .feed-glyph { color: var(--sun-hi); background: rgba(var(--sun-rgb), 0.24); }
+.feed-item.jackpot .feed-amt { color: var(--sun-hi); font-weight: 700; }
+.result.jackpot .result-title { font-size: 1.4em; letter-spacing: 0.12em; color: var(--sun-hi); text-shadow: 0 0 40px rgba(var(--sun-rgb), 0.8); }
 
 .console-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 6px 10px;
   margin-top: 12px;
   font-size: 12px;
   color: var(--ink-2);
@@ -907,9 +955,12 @@ select.dash-input { padding-right: 28px; }
   place-items: center;
   padding: 16px;
   background: rgba(6, 5, 11, 0.7);
-  backdrop-filter: blur(6px);
+  /* Not on this full-viewport layer: a backdrop-filter over the animated chart canvas can leave the
+     GPU compositor stuck showing black there after the layer is removed, on some browsers/GPUs. Blurring
+     just the small card behind it (below) gets a very similar look without covering the canvas. */
 }
 .modal-card {
+  position: relative;
   width: min(440px, 100%);
   max-height: calc(100vh - 32px);
   overflow-y: auto;
@@ -918,6 +969,7 @@ select.dash-input { padding-right: 28px; }
   background: var(--night-1);
   border: 1px solid var(--line-strong);
   box-shadow: 0 40px 120px -40px rgba(0, 0, 0, 0.9);
+  backdrop-filter: blur(6px);
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .modal-title { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: 18px; }
@@ -1028,7 +1080,8 @@ select.dash-input { padding-right: 28px; }
 
   .readout { top: calc(var(--topbar-h, 150px) + 6px); max-width: calc(100vw - 2 * var(--gutter)); }
   .strike-row { gap: 20px; margin-top: 8px; }
-  .position-chip { top: calc(var(--topbar-h, 150px) + 126px); bottom: auto; left: var(--gutter); transform: none; font-size: 12px; padding: 8px 14px; }
+  .position-chip { top: calc(var(--topbar-h, 150px) + 126px); bottom: auto; left: var(--gutter); transform: none; justify-content: flex-start; }
+  .bet-pill { font-size: 11px; padding: 5px 10px; }
   .side-pool { font-size: 11px; gap: 6px; padding-top: 6px; }
   .side-players .word { display: none; }
   .stake { gap: 8px; }
@@ -1053,6 +1106,14 @@ select.dash-input { padding-right: 28px; }
   .chart-btn { padding: 4px 7px; }
 
   .toast { left: 16px; right: 16px; bottom: auto; top: 16px; max-width: none; }
+
+  /* Bet length and in-play balance share one row; readout cells stay on one line (chart room) */
+  .dur-btn { width: 40px; font-size: 11px; }
+  .bank { gap: 4px; }
+  .bank-label { display: none; }
+  .bank-btn { padding: 3px 6px; }
+  .stake-fee { font-size: 10px; }
+  .cell-val.streak i { width: 6px; height: 6px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1109,10 +1170,11 @@ select.dash-input { padding-right: 28px; }
 
 @media (max-width: 720px) {
   /* One compact row on phones so the chart keeps its height; last rounds stay on larger screens */
-  .strike-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .strike-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
   .strike-row .cell-val { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .strike-row .cell-label { font-size: 9px; }
-  .strike-cell:has(#recent-results) { display: none; }
+  .cell-val.streak { gap: 3px; }
+  .cell-val.streak span { margin-left: 2px; font-size: 11px; }
 }
 
 /* Network fee note under the stake (Live mode) */

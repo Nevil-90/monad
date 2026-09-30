@@ -8,15 +8,15 @@
  *   3. prints the transaction the Safe's signers must approve: acceptOwnership() on the contract
  *
  * Until the Safe accepts, the current owner stays in control, so a wrong address changes nothing.
- * What the owner can and cannot do is listed in SECURITY_FIXES.md (SEC-16): it cannot touch pool
- * money in any case; the multisig protects the fee settings, pause and the 2-day oracle signer change.
+ * The owner cannot touch player balances, reserved payouts or pending bets in any case; the multisig
+ * protects the multiplier and limits, markets, pause and the 2-day oracle signer change.
  *
  * Usage: npm run transfer-owner -- 0xSAFE [--network testnet]   (current owner key in DEPLOYER_PRIVATE_KEY or KEEPER_PRIVATE_KEY)
  */
 
 import { ethers } from 'ethers';
 import { ENVIRONMENTS } from '../src/config.js';
-import { AMM_ABI } from '../src/contracts/AMMAbi.js';
+import { HOUSE_ABI } from '../src/contracts/HouseAbi.js';
 import { MonadRpcProvider } from '../src/rpc.js';
 
 const args = process.argv.slice(2);
@@ -30,7 +30,7 @@ if (!safe || !net || !key || !net.contractAddress) {
 
 const provider = new MonadRpcProvider(net.rpcUrl, net.chainId);
 const wallet = new ethers.Wallet(key, provider);
-const amm = new ethers.Contract(net.contractAddress, AMM_ABI, wallet);
+const amm = new ethers.Contract(net.contractAddress, HOUSE_ABI, wallet);
 const safeAbi = ['function getOwners() view returns (address[])', 'function getThreshold() view returns (uint256)'];
 
 if ((await amm.owner()).toLowerCase() !== wallet.address.toLowerCase()) throw new Error(`${wallet.address} is not the current owner.`);
@@ -47,8 +47,13 @@ console.log(`Safe ${safe}: ${threshold} of ${owners.length} signatures required`
 for (const o of owners) console.log(`  signer ${o}`);
 if (threshold < 2n) throw new Error('A 1-of-n Safe is no safer than a single key. Use at least 2 required signatures.');
 
+// A handful of sends were seen rejected as "insufficient balance" on well-funded wallets on Monad
+// testnet, not really about the gasLimit value (see house_keeper.js for the closest thing to a root
+// cause: overlapping transactions racing the same wallet key). Kept as a cheap defensive buffer.
+const MIN_GAS_LIMIT = 200_000n;
 const est = await amm.transferOwnership.estimateGas(safe);
-const rc = await (await amm.transferOwnership(safe, { gasLimit: (est * 110n) / 100n })).wait();
+const buffered = (est * 110n) / 100n;
+const rc = await (await amm.transferOwnership(safe, { gasLimit: buffered > MIN_GAS_LIMIT ? buffered : MIN_GAS_LIMIT })).wait();
 console.log(`[OK] transferOwnership(${safe}) sent: ${rc.hash}`);
 console.log('\nNow, in the Safe app, create a transaction for the signers to approve:');
 console.log(`  to:    ${net.contractAddress}`);

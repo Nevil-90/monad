@@ -26,11 +26,11 @@ export default function AppShell() {
           </div>
           <div className="boot-stage">
             <div className="boot-brand">MonadPulse</div>
-            <div className="boot-tag">Rise or fall · every minute · on Monad</div>
+            <div className="boot-tag">Rise or fall · 30 seconds · on Monad</div>
             <ul className="boot-steps">
               <li data-boot="network"><span className="boot-check" aria-hidden="true"></span>Connecting to Monad</li>
               <li data-boot="prices"><span className="boot-check" aria-hidden="true"></span>Streaming live prices</li>
-              <li data-boot="round"><span className="boot-check" aria-hidden="true"></span>Reading the current round</li>
+              <li data-boot="round"><span className="boot-check" aria-hidden="true"></span>Opening the house</li>
             </ul>
           </div>
         </div>
@@ -98,44 +98,42 @@ export default function AppShell() {
             <div className="strike-row">
               <div className="strike-cell">
                 <span className="cell-label">Strike</span>
-                <span className="cell-val num" id="strike-val" title="RedStone's signed price at the lock time, verified by the contract">Sets at lock</span>
+                <span className="cell-val num" id="strike-val" title="RedStone's signed price at your bet's strike time, verified by the contract">—</span>
               </div>
               <div className="strike-cell">
                 <span className="cell-label">Distance</span>
                 <span className="cell-val num" id="gap-val">—</span>
               </div>
               <div className="strike-cell">
-                <span className="cell-label">Last rounds</span>
-                <span className="cell-val recent num" id="recent-results" title="Winning side of recent rounds, newest on the right">—</span>
+                <span className="cell-label">Streak</span>
+                <span className="cell-val streak num" id="streak-val" title="Wins in a row on one-at-a-time bets. Reach the jackpot streak to win the jackpot.">—</span>
               </div>
             </div>
           </section>
 
           {/* Pulse board: what winners have been paid */}
-          <section className="pulse" id="pulse" aria-label="Pulse: payouts to winners">
+          <section className="pulse" id="pulse" aria-label="Streak jackpot and recent wins">
             <header className="pulse-head">
-              <span className="pulse-title"><span className="pulse-beat" aria-hidden="true"></span>Pulse</span>
+              <span className="pulse-title"><span className="pulse-beat" aria-hidden="true"></span>Jackpot</span>
               <span className="pulse-badge live" id="pulse-badge">On-chain</span>
             </header>
             <div className="pulse-big num" id="pulse-paid">—</div>
-            <div className="pulse-big-label">MON paid to winners</div>
+            <div className="pulse-big-label" id="pulse-big-label">MON in the streak jackpot</div>
             <div className="pulse-stats">
-              <div><span className="pulse-stat num" id="pulse-now">—</span><span className="pulse-stat-label">playing now</span></div>
-              <div><span className="pulse-stat num" id="pulse-rounds">—</span><span className="pulse-stat-label">rounds settled</span></div>
-              <div><span className="pulse-stat num" id="pulse-top">—</span><span className="pulse-stat-label">top payout</span></div>
+              <div><span className="pulse-stat num" id="pulse-now">—</span><span className="pulse-stat-label">your streak</span></div>
+              <div><span className="pulse-stat num" id="pulse-rounds">—</span><span className="pulse-stat-label">bets settled</span></div>
+              <div><span className="pulse-stat num" id="pulse-top">—</span><span className="pulse-stat-label">paid to players</span></div>
             </div>
             <ul className="pulse-feed" id="pulse-feed"></ul>
-            <p className="pulse-note" id="pulse-note">All-time totals read from the contract. The feed shows wins claimed on-chain.</p>
+            <p className="pulse-note" id="pulse-note">Win bets in a row, one at a time, to take a share of the jackpot. 1% of every stake feeds it.</p>
           </section>
 
           {/* Mobile: rotating latest win */}
           <div className="pulse-ticker hidden" id="pulse-ticker" aria-live="off"></div>
 
           {/* Live position status */}
-          <div className="position-chip hidden" id="position-chip" role="status">
-            <span className="position-glyph" id="position-glyph">▲</span>
-            <span id="position-text">—</span>
-          </div>
+          {/* Your bets on this market: one row each, live status, then the result for a few seconds */}
+          <div className="position-chip hidden" id="position-chip" role="status" aria-live="polite"></div>
 
           {/* Settlement result */}
           <div className="result hidden" id="result" role="status" aria-live="polite">
@@ -151,7 +149,6 @@ export default function AppShell() {
                 <span className="side-head"><span className="side-glyph">▲</span><span className="side-name">Rise</span></span>
                 <span className="side-mult num" id="up-mult">—</span>
                 <span className="side-win num" id="up-win">—</span>
-                <span className="side-pool num"><span id="up-pool">—</span><span className="side-players" id="up-players">—</span></span>
               </button>
 
               <div className="stake">
@@ -168,12 +165,22 @@ export default function AppShell() {
                   <button className="chip" id="stake-clear" aria-label="Clear stake">×</button>
                 </div>
                 <p className="stake-fee num hidden" id="stake-fee"></p>
-                <div className="tug" aria-label="Pool split">
-                  <div className="tug-bar"><span className="tug-up" id="tug-up"></span><span className="tug-down" id="tug-down"></span></div>
-                  <div className="tug-labels num">
-                    <span id="tug-up-label">—</span>
-                    <span id="tug-total">—</span>
-                    <span id="tug-down-label">—</span>
+                {/* Who is backing what in the upcoming window: the odds move toward the quieter side */}
+                <div className="lean hidden" id="lean" title="Rise and Fall bets in the window a bet placed now joins. The side more people back pays less; the other side pays more.">
+                  <div className="lean-bar"><span className="lean-up" id="lean-up"></span><span className="lean-down" id="lean-down"></span></div>
+                  <span className="lean-label num" id="lean-label">—</span>
+                </div>
+                <div className="bet-opts">
+                  <div className="dur" id="dur-toggle" role="group" aria-label="Bet length">
+                    <button className="dur-btn" data-dur="10" aria-pressed="false">10s</button>
+                    <button className="dur-btn active" data-dur="30" aria-pressed="true">30s</button>
+                    <button className="dur-btn" data-dur="60" aria-pressed="false">60s</button>
+                  </div>
+                  <div className="bank" id="bank">
+                    <span className="bank-label">In play</span>
+                    <span className="bank-val num" id="bank-val">—</span>
+                    <button className="chip bank-btn" id="ride-btn" title="Put your whole in-game balance in the stake, then pick Rise or Fall">Use all</button>
+                    <button className="chip bank-btn" id="cashout-btn" title="Send your in-game balance to your wallet">Cash out</button>
                   </div>
                 </div>
               </div>
@@ -182,7 +189,6 @@ export default function AppShell() {
                 <span className="side-head"><span className="side-glyph">▼</span><span className="side-name">Fall</span></span>
                 <span className="side-mult num" id="down-mult">—</span>
                 <span className="side-win num" id="down-win">—</span>
-                <span className="side-pool num"><span id="down-pool">—</span><span className="side-players" id="down-players">—</span></span>
               </button>
             </div>
 
@@ -194,7 +200,7 @@ export default function AppShell() {
               <span className="phase-label" id="phase-label">Betting open</span>
               <span className="phase-time num" id="phase-time">—</span>
               <span className="status-sep"></span>
-              <span className="round-id num">Round <span id="round-id">—</span></span>
+              <span className="round-id num">Max bet <span id="round-id">—</span></span>
               <span className="status-sep"></span>
               <div className="chart-toggle" role="group" aria-label="Chart style">
                 <button className="chart-btn active" data-chart="line" aria-pressed="true" title="Line">
@@ -224,7 +230,7 @@ export default function AppShell() {
             <header className="dash-head">
               <div>
                 <h1 className="dash-title">Every MON, on the record</h1>
-                <p className="dash-sub">Every row is an event emitted by the contract on Monad, indexed by the MonadPulse relay. Each one links to its transaction on the Monad explorer, so anyone can check it, and the totals are read from the contract itself.</p>
+                <p className="dash-sub">Every row is an event emitted by the house contract on Monad, indexed by the MonadPulse relay. Each one links to its transaction on the Monad explorer, so anyone can check it, and the totals are read from the contract itself.</p>
               </div>
               <div className="dash-source">
                 <div className="dash-sync"><span className="sync-dot" id="dash-sync-dot"></span><span id="dash-sync">Connecting…</span></div>
@@ -233,8 +239,8 @@ export default function AppShell() {
             </header>
 
             <section className="dash-stats">
-              <div className="dash-stat"><span className="dash-stat-label">Paid to winners</span><span className="dash-stat-val num" id="ds-paid">—</span><span className="dash-stat-note">All time · contract counter</span></div>
-              <div className="dash-stat"><span className="dash-stat-label">Settled volume</span><span className="dash-stat-val num" id="ds-volume">—</span><span className="dash-stat-note">All time · contract counter</span></div>
+              <div className="dash-stat"><span className="dash-stat-label">Paid to players</span><span className="dash-stat-val num" id="ds-paid">—</span><span className="dash-stat-note">Wins, jackpots, pushes · contract counter</span></div>
+              <div className="dash-stat"><span className="dash-stat-label">Wagered</span><span className="dash-stat-val num" id="ds-volume">—</span><span className="dash-stat-note">All time · contract counter</span></div>
               <div className="dash-stat"><span className="dash-stat-label">Players</span><span className="dash-stat-val num" id="ds-wallets">—</span><span className="dash-stat-note">All time · wallets that placed a bet</span></div>
               <div className="dash-stat"><span className="dash-stat-label">Bets placed</span><span className="dash-stat-val num" id="ds-bets">—</span><span className="dash-stat-note">All time · since deployment</span></div>
             </section>
@@ -246,7 +252,7 @@ export default function AppShell() {
                 <span className="flow-total num" id="flow-in-total">—</span>
               </div>
               <div className="flow-row">
-                <span className="flow-label">Taken out</span>
+                <span className="flow-label">Paid out</span>
                 <div className="flow-bar" id="flow-out"></div>
                 <span className="flow-total num" id="flow-out-total">—</span>
               </div>
@@ -258,7 +264,7 @@ export default function AppShell() {
                 <div className="tabs" role="tablist">
                   <button className="tab dash-tab active" role="tab" data-dtab="activity" aria-selected="true">Activity</button>
                   <button className="tab dash-tab" role="tab" data-dtab="wallets" aria-selected="false">Wallets</button>
-                  <button className="tab dash-tab" role="tab" data-dtab="rounds" aria-selected="false">Rounds</button>
+                  <button className="tab dash-tab" role="tab" data-dtab="rounds" aria-selected="false">Bets</button>
                 </div>
                 <div className="dash-filters">
                   <button className="dash-input dash-mine" id="dash-mine" aria-pressed="false" disabled title="Connect a wallet to see your activity">My activity</button>
@@ -268,9 +274,10 @@ export default function AppShell() {
                     <option value="all">All activity</option>
                     <option value="bet">Bets</option>
                     <option value="win">Wins</option>
-                    <option value="refund">Refunds</option>
-                    <option value="fee">Fees paid out</option>
-                    <option value="market">New markets</option>
+                    <option value="jackpot">Jackpots</option>
+                    <option value="refund">Pushes and voids</option>
+                    <option value="cashout">Cash-outs</option>
+                    <option value="lp">Vault deposits and withdrawals</option>
                   </select>
                 </div>
               </div>
@@ -296,9 +303,9 @@ export default function AppShell() {
         <aside className="ledger" id="ledger" aria-label="Ledger" aria-hidden="true">
           <header className="ledger-head">
             <div className="tabs" role="tablist">
-              <button className="tab active" role="tab" data-pane="positions" aria-selected="true">Positions</button>
-              <button className="tab" role="tab" data-pane="history" aria-selected="false">Rounds</button>
-              <button className="tab" role="tab" data-pane="stats" aria-selected="false">Stats</button>
+              <button className="tab active" role="tab" data-pane="positions" aria-selected="true">My bets</button>
+              <button className="tab" role="tab" data-pane="history" aria-selected="false">Live feed</button>
+              <button className="tab" role="tab" data-pane="stats" aria-selected="false">House</button>
             </div>
             <button className="icon-btn" id="ledger-close" aria-label="Close ledger">✕</button>
           </header>
@@ -313,12 +320,13 @@ export default function AppShell() {
 
           <div className="pane" id="pane-stats" role="tabpanel">
             <div className="stat-group">
-              <h3 className="stat-title">This round</h3>
+              <h3 className="stat-title">The house</h3>
+              <p className="stat-note" id="house-note">Every bet is against this vault.</p>
               <dl className="stat-grid">
-                <div><dt>Pool</dt><dd className="num" id="stat-pool">—</dd></div>
-                <div><dt>Rise / Fall</dt><dd className="num" id="stat-split">—</dd></div>
-                <div><dt>Your stake impact</dt><dd className="num" id="stat-impact">—</dd></div>
-                <div><dt>Protocol fee</dt><dd className="num" id="stat-fee">—</dd></div>
+                <div><dt>Payout</dt><dd className="num" id="stat-pool">—</dd></div>
+                <div><dt>Vault</dt><dd className="num" id="stat-split">—</dd></div>
+                <div><dt>Reserved for bets</dt><dd className="num" id="stat-impact">—</dd></div>
+                <div><dt>Bet range</dt><dd className="num" id="stat-fee">—</dd></div>
               </dl>
             </div>
             <div className="stat-group">
@@ -331,11 +339,16 @@ export default function AppShell() {
               </dl>
             </div>
             <div className="stat-group">
-              <h3 className="stat-title">Create a market</h3>
-              <p className="stat-note">Anyone can open a market for a RedStone price feed and earns 0.1% of its settled volume. New markets start unverified.</p>
-              <div className="stat-actions">
-                <button className="solid-btn" id="open-create">New market</button>
-                <button className="ghost-btn" id="claim-royalties">Claim creator fees</button>
+              <h3 className="stat-title">Be the house</h3>
+              <p className="stat-note" id="lp-note">Anyone can own part of the vault. Add MON and you get a share of it: when players lose, the vault grows and your share is worth more; when they win, it shrinks. Over many bets the 1.90× payout leaves the house about 4% of what is wagered, so the vault tends to grow, but a lucky run can take from it. A deposit stays locked for an hour, so nobody can jump in only around results they can already see.</p>
+              <dl className="stat-grid">
+                <div><dt>Your share</dt><dd className="num" id="lp-share">—</dd></div>
+                <div><dt>Worth</dt><dd className="num" id="lp-value">—</dd></div>
+              </dl>
+              <div className="lp-form">
+                <input type="number" id="lp-amount" className="dash-input num" min="0" step="1" placeholder="MON" inputMode="decimal" aria-label="Amount in MON" />
+                <button className="solid-btn" id="lp-add">Add</button>
+                <button className="ghost-btn" id="lp-remove">Withdraw all</button>
               </div>
             </div>
           </div>
@@ -351,23 +364,23 @@ export default function AppShell() {
             <ol className="guide">
               <li>
                 <span className="guide-n num">1</span>
-                <div><h3>Pick a side</h3><p>Rounds are quick: the strike locks 10–20 s after the round's first bet and the result comes 20 s later. The next round opens as soon as betting closes, so there is always a round to play. Stake on <b className="rise">Rise</b> if you think the price ends above the strike, or <b className="fall">Fall</b> if below.</p></div>
+                <div><h3>Call it</h3><p>Pick <b className="rise">Rise</b> or <b className="fall">Fall</b> and a length: 10, 30 or 60 seconds. Bet any time. There is no round to wait for and nobody else needs to join: the house takes the other side of every bet.</p></div>
               </li>
               <li>
                 <span className="guide-n num">2</span>
-                <div><h3>The strike locks</h3><p>Just after betting closes, the official price is locked as the strike: the bright line across the chart. From here, watch it move.</p></div>
+                <div><h3>The strike is set</h3><p>Your strike is the official price at the next 10-second mark, a few seconds after your bet lands, so nobody bets on a price they have already seen. The result is the price your chosen length later.</p></div>
               </li>
               <li>
                 <span className="guide-n num">3</span>
-                <div><h3>Winners split the pool</h3><p>Everyone on the winning side shares the whole pool, less a <span className="num" id="guide-fee">1.5%</span> fee, in proportion to their stake. The multiplier on each side is your payout per 1 MON right now, and it moves as others bet.</p></div>
+                <div><h3>Win up to <span className="num" id="guide-fee">2.38×</span></h3><p>The odds move with the betting: the side more players back pays less, the other side more (about 1.9× when even). Your payout is fixed when your bet lands. Right call: it is credited to your in-game balance seconds after the result, less a small fee on the profit. Bet it again (<b>Use all</b> puts it in the stake, then you pick Rise or Fall), or cash out to your wallet any time. An exact tie gives your stake back.</p></div>
               </li>
               <li>
                 <span className="guide-n num">4</span>
-                <div><h3>No contest, stake back</h3><p>If nobody took the other side, or the price closes exactly at the strike, your stake is refunded in full. Network fees for placing and claiming a bet are paid to Monad and are not refundable.</p></div>
+                <div><h3>Chase the jackpot</h3><p>Win bets in a row, one at a time, and your streak grows. Hit the jackpot streak and you take a share of the jackpot, which 1% of every stake feeds. A loss resets the streak.</p></div>
               </li>
             </ol>
-            <p className="guide-note">The chart streams live Coinbase trades. Rounds are decided by the official price: RedStone's signed report at the lock time (the strike) and at the close time, verified by the contract. The two sources agree to a few hundredths of a percent, so a round that close is shown as too close to call. Every bet and payout is a transaction on Monad, public in the Dashboard. Connect a wallet with MON to play.</p>
-            <div className="modal-actions"><button className="solid-btn" data-close="guide-modal">Start trading</button></div>
+            <p className="guide-note">The multiplier is below 2× on a coin-flip, so over time the house keeps a small edge; that is what pays for the jackpot and the vault. The chart streams live Coinbase trades; bets are decided by RedStone's signed prices, verified by the contract. Every bet, win and cash-out is a transaction on Monad, public in the Dashboard. Network fees go to Monad.</p>
+            <div className="modal-actions"><button className="solid-btn" data-close="guide-modal">Start playing</button></div>
           </div>
         </div>
 
@@ -382,41 +395,7 @@ export default function AppShell() {
           </div>
         </div>
 
-        {/* Create market dialog */}
-        <div className="modal hidden" id="create-modal" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
-          <div className="modal-card">
-            <header className="modal-head">
-              <h2 className="modal-title" id="create-modal-title">New market</h2>
-              <button className="icon-btn" data-close="create-modal" aria-label="Close">✕</button>
-            </header>
-            <form className="form" id="create-form" noValidate>
-              <label className="field">
-                <span className="field-label">Asset name</span>
-                <input type="text" id="cm-name" placeholder="Sui" maxLength="32" autoComplete="off" />
-              </label>
-              <label className="field">
-                <span className="field-label">Symbol</span>
-                <input type="text" id="cm-symbol" placeholder="SUI/USD" maxLength="16" autoComplete="off" />
-              </label>
-              <label className="field">
-                <span className="field-label">RedStone feed ID</span>
-                <input type="text" id="cm-feed" className="num" placeholder="SUI" maxLength="31" autoComplete="off" spellCheck="false" />
-              </label>
-              <div className="field">
-                <span className="field-label">Round length</span>
-                <div className="segmented" id="cm-duration">
-                  <button type="button" className="seg" data-sec="60">1 min</button>
-                  <button type="button" className="seg active" data-sec="300">5 min</button>
-                  <button type="button" className="seg" data-sec="900">15 min</button>
-                </div>
-              </div>
-              <p className="form-note">Sent from your connected wallet in Live mode. Use a 24/7 feed; market-hours feeds pause outside trading hours.</p>
-              <p className="form-error hidden" id="cm-error"></p>
-              <button type="submit" className="solid-btn wide" id="cm-submit">Create market</button>
-            </form>
-          </div>
-        </div>
-
+        
         {/* Toast */}
         <div className="toast hidden" id="toast" role="status" aria-live="polite">
           <div className="toast-body">

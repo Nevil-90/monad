@@ -1,5 +1,23 @@
 # Security Fixes Checklist
 
+> **Scope note (2026-09-27):** the findings below were for the retired pari-mutuel rounds contract
+> `MonadUpDownAMM`, which has been removed from this repository in favour of `MonadPulseHouse`. The
+> oracle findings (SEC-01/02, 21, 22, 23, 27, 28) still apply because `SignedPriceOracle.sol` is shared;
+> the others are kept as history. The test commands listed below refer to suites that were removed with
+> that contract. `MonadPulseHouse` is covered by `npm run test:house`; SEC-30 is its first finding.
+
+## MonadPulseHouse
+
+| ID | Severity | Finding | Status | Regression test |
+|---|---|---|---|---|
+| SEC-30 | High | Void/push refunded the full stake from `vaultAssets`, which had only ever received `stake - jackpotCut` for that bet; the jackpot cut leaked from the LP vault into the jackpot pot on every void/push | ✅ Fixed | `test:house` solvency checks |
+
+### SEC-30: Jackpot cut leaked from the vault on void/push (High) ✅
+**Bug.** `placeBet` splits every stake into `toVault = stake - cut` (credited to `vaultAssets`) and `cut` (credited to `jackpotPot`). But `_settle` refunded the *full* `stake` from `vaultAssets` on `Push` and `Void` ("a bet whose price never appears is void ... and its stake is returned"). Since `vaultAssets` for that bet only ever grew by `toVault`, every void or push quietly transferred `cut` from the LP vault to the jackpot pot, on top of the cut already taken. This broke the documented solvency invariant ("the vault can always pay every winner") over time: `vaultAssets` decayed independently of `lockedPayouts`, and enough voids/pushes could eventually make `vaultAssets -= paid` underflow and revert, permanently stalling settlement (and the stake) of whatever bet triggered it. Confirmed with `test:house`: the jackpot pot grew across the void test even though the voided bet's full stake was refunded and no jackpot was won.
+**Fix.** Each `Bet` now stores the `cut` taken at placement. On `Push`/`Void`, that cut is returned from `jackpotPot` to `vaultAssets` (capped at the pot's current balance, in case earlier jackpot payouts already spent it) before the stake is debited, so the vault only ever nets `-(stake - cut)` for a bet that never played, matching what it actually received.
+**Files.** `contracts/MonadPulseHouse.sol` (`Bet.cut`, `placeBet`, `_settle`)
+**Test.** `test:house`'s per-step solvency invariant (`held == vault + balances + pot + treasury`) still holds; the void/push cases now show the pot's growth net of the returned cut instead of retaining it.
+
 Tracks every security finding for `MonadUpDownAMM`: what was wrong, what changed, and which test proves it is still fixed. Update this file whenever a finding is fixed, reopened, or regresses.
 
 ## How to verify

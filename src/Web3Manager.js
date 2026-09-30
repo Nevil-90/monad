@@ -12,8 +12,16 @@
 
 import { ethers } from 'ethers';
 import { getConfig, setEnvironment, ENVIRONMENTS } from './config.js';
-import { AMM_ABI } from './contracts/AMMAbi.js';
+import { HOUSE_ABI } from './contracts/HouseAbi.js';
 import { MonadRpcProvider } from './rpc.js';
+
+// A handful of sends were seen rejected as "Signer had insufficient balance" on well-funded wallets on
+// Monad testnet; retesting the identical call later succeeded, so it wasn't really about the gasLimit
+// value. Best evidence (from a separately reproduced, related case - see house_keeper.js): overlapping
+// transactions from the same wallet key (another script or process active on it at the same time) can
+// leave the node's balance/nonce view briefly inconsistent. Not proven beyond that, but MIN_GAS_LIMIT
+// is kept as a cheap defensive buffer regardless, applied everywhere a gas limit is computed here.
+const MIN_GAS_LIMIT = 200_000n;
 
 export const MONAD_NETWORKS = {
   get testnet() {
@@ -60,7 +68,7 @@ export class Web3Manager {
     this.isLiveNetwork = false;
     
     // Contract Interface for zero-bug ABI encoding
-    this.iface = new ethers.Interface(AMM_ABI);
+    this.iface = new ethers.Interface(HOUSE_ABI);
 
     // Dynamically initialized from active environment configuration
     this.contractAddress = getConfig().contractAddress;
@@ -72,18 +80,8 @@ export class Web3Manager {
       this.readOnlyProvider = null;
     }
 
-    // Dynamic on-chain protocol state (Zero hardcoding)
-    this.protocolState = {
-      totalFeeBps: null,
-      creatorFeeBps: null,
-      keeperFeeBps: null,
-      treasuryFeeBps: null,
-      lockBufferSeconds: null,
-      minBetWei: null,
-      priceWindowSeconds: null,
-      liveGasPriceWei: null
-    };
-
+    // Live gas price, read on demand
+    this.protocolState = { liveGasPriceWei: null };
   }
 
   discoverWallets() {
@@ -252,8 +250,7 @@ export class Web3Manager {
       // 3. Fetch Real Monad Balance
       await this.fetchBalance();
 
-      // 4. Fetch Live Protocol Fees & Gas Prices directly from chain
-      await this.fetchLiveProtocolFees();
+      // 4. Live gas price from the chain
       await this.fetchLiveGasFee();
 
       this.emit('connected', {
@@ -351,40 +348,36 @@ export class Web3Manager {
     }
   }
 
+  /** Reads view functions of the house contract in parallel: { name: value } (a failed read throws) */
+  async readViews(names, args = {}) {
+    if (!this.contractAddress) throw new Error('No contract address configured (NEXT_PUBLIC_CONTRACT_ADDRESS).');
+    const entries = await Promise.all(names.map(async (name) => {
+      const data = this.iface.encodeFunctionData(name, args[name] || []);
+      const hex = await this.ethCall(data, this.contractAddress);
+      const out = this.iface.decodeFunctionResult(name, hex);
+      return [name, out.length === 1 ? out[0] : out];
+    }));
+    return Object.fromEntries(entries);
+  }
+
+  /** House rules and vault state, one call (houseInfo; fields by name, bigints as returned) */
+  async fetchHouse() {
+    const { houseInfo, maxWinBps } = await this.readViews(['houseInfo', 'maxWinBps']);
+    return { ...houseInfo.toObject(), maxWinBps };
+  }
+
   /**
-   * Dynamically queries on-chain protocol fees from the deployed smart contract
+   * What a bet placed now would get, from the contract (odds move with the betting in each window):
+   * { payout, grossPayout, startTs, priceBps, upShares, downShares, refused }
    */
-  async fetchLiveProtocolFees() {
-    if (!this.contractAddress) return null;
-    try {
-      const calls = [
-        { key: 'totalFeeBps', name: 'protocolTotalFeeBps', transform: Number },
-        { key: 'creatorFeeBps', name: 'creatorFeeBps', transform: Number },
-        { key: 'keeperFeeBps', name: 'keeperFeeBps', transform: Number },
-        { key: 'treasuryFeeBps', name: 'treasuryFeeBps', transform: Number },
-        { key: 'minBetWei', name: 'minBet', transform: BigInt },
-        { key: 'lockBufferSeconds', name: 'lockBufferSeconds', transform: Number },
-        { key: 'priceWindowSeconds', name: 'priceWindowSeconds', transform: Number },
-        { key: 'bettingWindowSeconds', name: 'bettingWindowSeconds', transform: Number }
-      ];
+  async fetchQuote(marketId, side, duration, stakeWei) {
+    const { quote } = await this.readViews(['quote'], { quote: [marketId, side === 'UP' ? 1 : 2, duration, stakeWei] });
+    return quote.toObject();
+  }
 
-      for (const item of calls) {
-        try {
-          const data = this.iface.encodeFunctionData(item.name, []);
-          const resHex = await this.ethCall(data, this.contractAddress);
-          if (resHex && resHex !== '0x') {
-            const decoded = this.iface.decodeFunctionResult(item.name, resHex);
-            this.protocolState[item.key] = item.transform(decoded[0]);
-          }
-        } catch (err) {
-          console.warn(`Could not read ${item.name} from the contract:`, err);
-        }
-      }
-
-      return this.protocolState;
-    } catch (err) {
-      return null;
-    }
+  /** The connected wallet's in-game balance, streak and vault position, one call (playerInfo) */
+  async fetchPlayer(account = this.account) {
+    return (await this.readViews(['playerInfo'], { playerInfo: [account] })).playerInfo;
   }
 
   /**
@@ -402,8 +395,10 @@ export class Web3Manager {
     } catch (err) {
       throw new Error(this.revertReason(err));
     }
-    // Monad charges the full gas limit, not gas used (SEC-25): keep the margin small
-    const gasLimitWithBuffer = (BigInt(estHex) * 110n) / 100n;
+    // Monad charges the full gas limit, not gas used (SEC-25): keep the margin small. See MIN_GAS_LIMIT
+    // above for the (unconfirmed) defensive floor applied on top of that margin.
+    const buffered = (BigInt(estHex) * 110n) / 100n;
+    const gasLimitWithBuffer = buffered > MIN_GAS_LIMIT ? buffered : MIN_GAS_LIMIT;
     return '0x' + gasLimitWithBuffer.toString(16);
   }
 
@@ -444,286 +439,95 @@ export class Web3Manager {
   }
 
   /**
-   * Dispatches a real transaction on Monad via MetaMask / Rabby with dynamic gas estimation
-   * Supports slippage/min-odds protection (VULN-03)
+   * Sends a call to the house contract: network check, gas estimate (a revert is reported with its
+   * reason before the wallet opens), then the wallet's confirmation. A cancel is not an error log.
    */
-  async sendTradeTransaction(side, marketIdInput, roundId, amountMon, minMultiplierWad = 0n) {
-    if (!this.provider || !this.account) {
-      return { success: false, error: 'Wallet not connected' };
-    }
-
+  async sendContractTx(fn, args, valueWei = 0n, { onPending } = {}) {
+    if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
     const net = await this.ensureNetwork();
     if (!net.ok) return { success: false, error: net.error };
-
     try {
-      const valueWei = ethers.parseEther(amountMon.toString());
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const isUp = side === 'UP';
-
-      let data;
-      if (minMultiplierWad && minMultiplierWad > 0n) {
-        const fnName = isUp ? 'betUpWithMinOdds' : 'betDownWithMinOdds';
-        data = this.iface.encodeFunctionData(fnName, [marketBytes32, roundId, minMultiplierWad]);
-      } else {
-        const fnName = isUp ? 'betUp' : 'betDown';
-        data = this.iface.encodeFunctionData(fnName, [marketBytes32, roundId]);
-      }
-
       const txParams = {
         from: this.account,
         to: this.contractAddress,
-        value: '0x' + valueWei.toString(16),
-        data: data
+        value: '0x' + BigInt(valueWei).toString(16),
+        data: this.iface.encodeFunctionData(fn, args)
       };
-
-      // Dynamically estimate gas on-chain
       txParams.gas = await this.estimateGasWithBuffer(txParams);
-
-      this.emit('txPending', { side, amount: amountMon });
-
-      const txHash = await this.provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams]
-      });
-
-      this.emit('txSuccess', { txHash, side, amount: amountMon });
+      onPending?.();
+      const txHash = await this.provider.request({ method: 'eth_sendTransaction', params: [txParams] });
       return { success: true, txHash };
     } catch (err) {
-      // A cancel in the wallet is a normal choice, not a failure: no console error for it
       const error = this.txError(err);
-      if (!this.isUserRejection(err)) console.warn('Bet not sent:', error);
-      this.emit('txError', error);
-      return { success: false, error };
+      if (!this.isUserRejection(err)) console.warn(`${fn} not sent:`, error);
+      return { success: false, error, cancelled: this.isUserRejection(err) };
     }
   }
 
   /**
-   * Claim payout for a settled or cancelled round
+   * Places a bet: `walletWei` sent from the wallet plus `balanceWei` from the in-game balance.
+   * minPayoutWei guards against the odds moving (other bets in the window) between the quote and inclusion.
    */
-  async claimPayout(marketIdInput, roundId) {
-    if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
-    const net = await this.ensureNetwork();
-    if (!net.ok) return { success: false, error: net.error };
-    try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('claimPayout', [marketBytes32, roundId]);
-
-      const txParams = { from: this.account, to: this.contractAddress, data };
-      txParams.gas = await this.estimateGasWithBuffer(txParams);
-
-      const txHash = await this.provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams]
-      });
-      return { success: true, txHash };
-    } catch (err) {
-      return { success: false, error: this.txError(err) };
-    }
+  async placeBet({ side, marketId, duration, walletWei, balanceWei, minPayoutWei }) {
+    const res = await this.sendContractTx(
+      'placeBet',
+      [marketId, side === 'UP' ? 1 : 2, duration, balanceWei, minPayoutWei],
+      walletWei,
+      { onPending: () => this.emit('txPending', { side, amount: Number(ethers.formatEther(walletWei + balanceWei)) }) }
+    );
+    if (res.success) this.emit('txSuccess', { txHash: res.txHash, side, amount: Number(ethers.formatEther(walletWei + balanceWei)) });
+    return res;
   }
 
   /**
-   * Atomic multi-round batch claim with dynamic on-chain gas estimation
+   * Network fee of a bet, from the chain: eth_estimateGas for this exact call from this wallet, with
+   * the same +10% margin the transaction is sent with (Monad charges the full gas limit), times the
+   * chain's gas price. Returns { gasLimit, gasPriceWei, feeWei }; throws with the revert reason if the
+   * bet would fail.
    */
-  async claimBatch(marketIdInput, roundIds) {
-    if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
-    const net = await this.ensureNetwork();
-    if (!net.ok) return { success: false, error: net.error };
+  async estimateBetFee({ side, marketId, duration, walletWei, balanceWei, minPayoutWei }, gasPriceWei = null) {
+    if (!this.account || !this.readOnlyProvider) throw new Error('Connect a wallet to estimate the network fee.');
+    const tx = {
+      from: this.account,
+      to: this.contractAddress,
+      value: walletWei,
+      data: this.iface.encodeFunctionData('placeBet', [marketId, side === 'UP' ? 1 : 2, duration, balanceWei, minPayoutWei])
+    };
+    let est;
     try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('claimBatch', [marketBytes32, roundIds]);
-
-      const txParams = { from: this.account, to: this.contractAddress, data };
-      txParams.gas = await this.estimateGasWithBuffer(txParams);
-
-      const txHash = await this.provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams]
-      });
-      return { success: true, txHash };
+      est = await this.readOnlyProvider.estimateGas(tx);
     } catch (err) {
-      return { success: false, error: this.txError(err) };
+      // ethers puts the revert data on err.data; keep its short message otherwise
+      throw new Error(this.revertReason({ data: err?.data, message: err?.shortMessage || err?.message }));
     }
+    const buffered = (est * 110n) / 100n;
+    const gasLimit = buffered > MIN_GAS_LIMIT ? buffered : MIN_GAS_LIMIT;
+    const price = gasPriceWei ?? (await this.readOnlyProvider.getFeeData()).gasPrice;
+    if (!price) throw new Error('The network did not return a gas price.');
+    return { gasLimit, gasPriceWei: price, feeWei: gasLimit * price };
   }
 
   /**
-   * Emergency refund if round is unresolved past emergency timeout
+   * Settle bets from this wallet (settlement is permissionless): records the signed prices it needs,
+   * then settles. For when the keeper is late or absent; costs this wallet the network fee.
    */
-  async emergencyRefund(marketIdInput, roundId) {
-    if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
-    const net = await this.ensureNetwork();
-    if (!net.ok) return { success: false, error: net.error };
-    try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('emergencyRefund', [marketBytes32, roundId]);
-
-      const txParams = { from: this.account, to: this.contractAddress, data };
-      txParams.gas = await this.estimateGasWithBuffer(txParams);
-
-      const txHash = await this.provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams]
-      });
-      return { success: true, txHash };
-    } catch (err) {
-      return { success: false, error: this.txError(err) };
-    }
+  settleBets(updates, betIds) {
+    return this.sendContractTx('recordAndSettle', [updates, betIds]);
   }
 
-  /**
-   * Claim creator royalties
-   */
-  async claimCreatorFees(marketIdInput) {
-    if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
-    const net = await this.ensureNetwork();
-    if (!net.ok) return { success: false, error: net.error };
-    try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('claimCreatorFees', [marketBytes32]);
-
-      const txParams = { from: this.account, to: this.contractAddress, data };
-      txParams.gas = await this.estimateGasWithBuffer(txParams);
-
-      const txHash = await this.provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams]
-      });
-      return { success: true, txHash };
-    } catch (err) {
-      return { success: false, error: this.txError(err) };
-    }
+  /** Cash out: the in-game balance to the wallet (0 = all of it) */
+  withdrawBalance(amountWei = 0n) {
+    return this.sendContractTx('withdrawBalance', [amountWei]);
   }
 
-  /**
-   * Permissionlessly create a market for a RedStone feed (e.g. "SUI"). New markets start unverified (SEC-08).
-   */
-  async createMarket(feed, name, symbol, roundDurationSec) {
-    if (!this.provider || !this.account) return { success: false, error: 'Wallet not connected' };
-    const net = await this.ensureNetwork();
-    if (!net.ok) return { success: false, error: net.error };
-    try {
-      const data = this.iface.encodeFunctionData('createMarket', [
-        ethers.encodeBytes32String(feed), name, symbol, roundDurationSec
-      ]);
-
-      const txParams = { from: this.account, to: this.contractAddress, data };
-      txParams.gas = await this.estimateGasWithBuffer(txParams);
-
-      const txHash = await this.provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams]
-      });
-      return { success: true, txHash };
-    } catch (err) {
-      return { success: false, error: this.txError(err) };
-    }
+  addLiquidity(amountWei) {
+    return this.sendContractTx('addLiquidity', [], amountWei);
   }
 
-  /**
-   * Query on-chain market status directly from AMM contract
-   */
-  async fetchOnChainMarket(marketIdInput) {
-    if (!this.contractAddress) return null;
-    try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('markets', [marketBytes32]);
-      const resHex = await this.ethCall(data, this.contractAddress);
-      if (!resHex || resHex === '0x') return null;
-      const decoded = this.iface.decodeFunctionResult('markets', resHex);
-      return {
-        marketId: decoded[0],
-        creator: decoded[1],
-        feedId: decoded[2],
-        name: decoded[3],
-        symbol: decoded[4],
-        roundDuration: Number(decoded[5]),
-        currentRoundId: Number(decoded[6]),
-        totalVolume: decoded[7],
-        creatorFeesAccrued: decoded[8],
-        active: decoded[9],
-        verified: Boolean(decoded[10]) // SEC-08: UIs should warn on unverified markets
-      };
-    } catch (err) {
-      return null;
-    }
+  removeLiquidity(shares) {
+    return this.sendContractTx('removeLiquidity', [shares]);
   }
 
-  /**
-   * Query on-chain round status directly from AMM contract
-   */
-  async fetchOnChainRound(marketIdInput, roundId) {
-    if (!this.contractAddress) return null;
-    try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('rounds', [marketBytes32, roundId]);
-      const resHex = await this.ethCall(data, this.contractAddress);
-      if (!resHex || resHex === '0x') return null;
-      // Read by field name: the struct is packed (SEC-25), so positions differ from the old layout
-      const d = this.iface.decodeFunctionResult('rounds', resHex);
-      return {
-        roundId: Number(d.roundId),
-        startTimestamp: Number(d.startTimestamp),
-        lockTimestamp: Number(d.lockTimestamp),
-        closeTimestamp: Number(d.closeTimestamp),
-        betCloseTimestamp: Number(d.betCloseTimestamp),
-        lockPublishTime: Number(d.lockPublishTime),
-        closePublishTime: Number(d.closePublishTime), // 0 until a close price is proposed
-        expiryTimestamp: Number(d.expiryTimestamp),   // unresolved after this: refundable (SEC-29)
-        finalizeAfter: Number(d.finalizeAfter),       // end of the challenge period for a late report (SEC-28)
-        maxReportDelay: Number(d.maxReportDelay),
-        lockPrice: d.lockPrice,
-        closePrice: d.closePrice,
-        totalUp: d.totalUp,
-        totalDown: d.totalDown,
-        totalPool: d.totalPool,
-        netPayoutPool: d.netPayoutPool,
-        winningSide: Number(d.winningSide), // 0: None, 1: Up, 2: Down
-        status: Number(d.status),           // 0: Inactive, 1: Open, 2: Locked, 3: Settled, 4: Cancelled
-        lockKeeper: d.lockKeeper,
-        feeBps: Number(d.feeBps),
-        creatorFeeBps: Number(d.creatorFeeBps),
-        keeperFeeBps: Number(d.keeperFeeBps),
-        priceWindow: Number(d.priceWindow),
-        upBettors: Number(d.upBettors),
-        downBettors: Number(d.downBettors)
-      };
-    } catch (err) {
-      return null;
-    }
-  }
-
-  /**
-   * Query on-chain user bet for a given round
-   */
-  async fetchUserBet(marketIdInput, roundId, userAddress = this.account) {
-    if (!this.contractAddress || !userAddress) return null;
-    try {
-      const marketBytes32 = this.formatBytes32(marketIdInput);
-      const data = this.iface.encodeFunctionData('userBets', [marketBytes32, roundId, userAddress]);
-      const resHex = await this.ethCall(data, this.contractAddress);
-      if (!resHex || resHex === '0x') return null;
-      const decoded = this.iface.decodeFunctionResult('userBets', resHex);
-      return {
-        amount: decoded[0],
-        side: Number(decoded[1]),
-        claimed: decoded[2]
-      };
-    } catch (err) {
-      return null;
-    }
-  }
-
-  formatBytes32(input) {
-    if (typeof input === 'string') {
-      if (input.startsWith('0x')) {
-        const clean = input.slice(2);
-        return '0x' + clean.padEnd(64, '0').slice(0, 64);
-      }
-      return ethers.encodeBytes32String(input.slice(0, 31));
-    }
-    return ethers.ZeroHash;
-  }
-
-  /** Forgets the wallet in this app (the wallet itself keeps its own site permission) */
   disconnect() {
     this.account = null;
     this.balance = null;

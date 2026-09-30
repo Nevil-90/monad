@@ -6,8 +6,8 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY src/config.js src/oracle.js src/rpc.js ./src/
-COPY src/contracts/AMMAbi.js ./src/contracts/
-COPY scripts/price_relay.js scripts/keeper_bot.js ./scripts/
+COPY src/contracts/HouseAbi.js ./src/contracts/
+COPY scripts/price_relay.js scripts/house_keeper.js ./scripts/
 COPY scripts/lib ./scripts/lib
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node

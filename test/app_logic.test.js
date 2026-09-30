@@ -13,7 +13,9 @@ import { ethers } from 'ethers';
 import { SUPPORTED_MARKETS } from '../src/config.js';
 import { toUnits, fromUnits, signReport, reportDigest, parsePackage, medianUnits, feedIdBytes32, fetchReportsAt, REDSTONE_PRIMARY_SIGNERS } from '../src/oracle.js';
 import { MarketState } from '../src/MarketState.js';
-import { LiveRounds } from '../src/LiveRounds.js';
+import { HouseState } from '../src/HouseState.js';
+import { ChainHistory } from '../src/ChainHistory.js';
+import { HOUSE_ABI } from '../src/contracts/HouseAbi.js';
 import { CircuitBreaker } from '../src/CircuitBreaker.js';
 import { isRateLimited } from '../src/rpc.js';
 
@@ -34,8 +36,7 @@ const close = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps * Math.max(1, Math.ab
 
 console.log('--- Markets ---');
 for (const [key, m] of Object.entries(SUPPORTED_MARKETS)) {
-  const expected = ethers.solidityPackedKeccak256(['bytes32', 'string', 'uint256'], [feedIdBytes32(m.feed), m.symbol, m.roundDuration]);
-  check(m.marketId === expected, `${key}: marketId matches keccak256(feed, symbol, duration) as the contract derives it`);
+  check(/^0x[0-9a-f]{64}$/.test(m.marketId), `${key}: marketId is a bytes32 id`);
   check(Boolean(m.feed && m.coinbase), `${key}: has a RedStone feed and a Coinbase product`);
 }
 
@@ -63,86 +64,53 @@ for (const feed of ['BTC', 'MON']) {
 check(medianUnits([5n, 1n, 3n]) === 3n && medianUnits([4n, 1n, 3n, 2n]) === 2n && medianUnits([]) === null,
   'Median matches the contract (odd: middle, even: floor of the mean of the two middle values)');
 
-console.log('\n--- Odds ---');
+console.log('\n--- Markets start empty ---');
 const ms = new MarketState({}, { skipFeed: true });
-const btc = ms.markets.BTC;
-check(btc.price === null && btc.roundId === null && btc.lockPrice === null, 'Markets start empty: no preset prices or rounds');
-Object.assign(btc, { poolUp: 12, poolDown: 10 });
-check(ms.getLiveOdds().multUp === null, 'No multiplier is shown until the contract fee is read');
-ms.feeBps = 150;
-const odds = ms.getLiveOdds();
-check(close(odds.multUp, (22 * 0.985) / 12) && close(odds.multDown, (22 * 0.985) / 10), 'Multipliers use the pools and the fee: net pool / side pool');
-check(close(ms.multiplierAfter('UP', 3), (25 * 0.985) / 15), 'Multiplier after a stake includes that stake on both totals');
-Object.assign(btc, { poolUp: 5, poolDown: 0 });
-check(ms.getLiveOdds().multUp === null, 'One-sided pool: no multiplier (the round would be refunded)');
+check(ms.markets.BTC.price === null && ms.markets.BTC.change24h === null, 'Markets start empty: no preset prices');
 
-console.log('\n--- Positions and payouts ---');
-const BTC_ID = SUPPORTED_MARKETS.BTC.marketId.toLowerCase();
-const me = '0x000000000000000000000000000000000000a11c';
-const other = '0x000000000000000000000000000000000000b0b0';
-const rec = (type, roundId, extra) => ({ type, user: me, marketId: BTC_ID, roundId, block: roundId, ...extra });
-const history = {
-  records: [
-    rec('bet', 1, { side: 'UP', amount: 2 }), rec('bet', 1, { side: 'UP', amount: 1 }),
-    { ...rec('bet', 1, { side: 'DOWN', amount: 4 }), user: other },
-    rec('bet', 2, { side: 'DOWN', amount: 1 }),
-    rec('bet', 3, { side: 'UP', amount: 1.5 }),
-    rec('bet', 4, { side: 'UP', amount: 1 }),
-    rec('bet', 5, { side: 'UP', amount: 0.7 }), rec('refund', 5, { amount: 0.7 })
-  ],
-  rounds: new Map([
-    [`${BTC_ID}:1`, { status: 'settled', winningSide: 'UP', up: 3, down: 4 }],
-    [`${BTC_ID}:2`, { status: 'settled', winningSide: 'UP', up: 5, down: 1 }],
-    [`${BTC_ID}:3`, { status: null, up: 1.5, down: 0 }],
-    [`${BTC_ID}:4`, { status: null, up: 1, down: 2 }],
-    [`${BTC_ID}:5`, { status: 'cancelled', up: 0.7, down: 0 }]
-  ]),
-  marketLabel: () => 'BTC/USD'
-};
-const live = new LiveRounds({ web3: { fetchOnChainRound: async () => ({ feeBps: 150 }) }, history });
-live.state = { marketId: SUPPORTED_MARKETS.BTC.marketId, roundId: 4, closedBetting: false };
-live.feeRates.set(`${BTC_ID}:1`, 150);
-const pos = Object.fromEntries(live.positions(me).map((p) => [p.roundId, p]));
-// Contract: fee = min(total * bps / 10000, losingPool); payout = stake * (total - fee) / winningPool
-const payout1 = (3 * (7 - Math.min((7 * 150) / 10000, 4))) / 3;
-check(pos[1].status === 'Won' && close(pos[1].payout, payout1) && pos[1].amount === 3, 'Won round: stakes summed, payout by the contract formula');
-check(pos[2].status === 'Lost', 'Lost round');
-check(pos[3].status === 'Refunded', 'One-sided past round: refundable directly (SEC-26)');
-check(pos[4].status === 'Active', 'Current round with betting open: active, not refundable');
-check(pos[5].status === 'Refunded' && pos[5].claimed && pos[5].payout === 0.7, 'Claimed refund: shows the exact amount transferred');
-live.state.closedBetting = true;
-Object.assign(history.rounds.get(`${BTC_ID}:4`), { down: 0 });
-check(live.positions(me).find((p) => p.roundId === 4).status === 'Refunded', 'Current round, one-sided after betting closed: refundable');
-const unread = new LiveRounds({ web3: { fetchOnChainRound: async () => null }, history });
-unread.state = live.state;
-check(unread.positions(me).find((p) => p.roundId === 1).payout === null, 'Win payout is not estimated until the round fee is read from the contract');
-
-console.log('\n--- Round phases (from the contract timestamps, no polling) ---');
-const base = { status: 1, totalUp: 1n, totalDown: 1n, betCloseTimestamp: 100, lockTimestamp: 110, closeTimestamp: 170, expiryTimestamp: 770, closePublishTime: 0 };
-const ph = (r, t) => LiveRounds.phaseOf({ ...base, ...r }, t).phase;
-check(ph({}, 90) === 'open' && ph({}, 105) === 'closed', 'Open until betCloseTimestamp, then closed until the strike locks');
-check(ph({ totalDown: 0n }, 105) === 'idle', 'One-sided after betting closed: idle (refundable, next bet opens a new round)');
-check(ph({ status: 2 }, 150) === 'locked' && ph({ status: 2 }, 175) === 'settling', 'Locked until close time, then settling');
-check(ph({ status: 2, closePublishTime: 180 }, 190) === 'confirming', 'A proposed (late) close report shows as confirming (SEC-28 challenge period)');
-check(ph({ status: 2 }, 771) === 'expired' && ph({ status: 1 }, 771) === 'expired', 'Contested and unresolved past expiry: refundable (SEC-29)');
-check(ph({ status: 3 }, 200) === 'ended', 'Settled: ended');
-live.state = { marketId: SUPPORTED_MARKETS.BTC.marketId, roundId: 5, closedBetting: false, live: { roundId: 4, expired: true } };
-Object.assign(history.rounds.get(`${BTC_ID}:4`), { down: 2 });
-check(live.positions(me).find((p) => p.roundId === 4).status === 'Refunded', 'Running contested round past expiry: shown as refundable');
-
-console.log('\n--- Continuous play: the round to bet on and the running round ---');
+console.log('\n--- House bets from contract events ---');
 {
-  const R = (id, o) => ({ roundId: id, status: 1, totalUp: 0n, totalDown: 0n, startTimestamp: 0, betCloseTimestamp: 100, lockTimestamp: 105, closeTimestamp: 125, expiryTimestamp: 725, finalizeAfter: 0, closePublishTime: 0, lockPrice: 0n, upBettors: 0, downBettors: 0, feeBps: 150, ...o });
-  let d = LiveRounds.derive(R(9, { totalUp: 1n, totalDown: 1n }), null, 90);
-  check(d.phase === 'open' && d.roundId === 9 && d.live === null, 'Current round taking bets: bets go into it, nothing running yet');
-  d = LiveRounds.derive(R(9, { totalUp: 1n, totalDown: 1n }), null, 101);
-  check(d.phase === 'next' && d.roundId === 10 && d.live?.roundId === 9 && d.live.phase === 'closed',
-    'Its betting closed: a bet opens round 10 while round 9 runs (shown live, strike next)');
-  d = LiveRounds.derive(R(10, { betCloseTimestamp: 130 }), R(9, { status: 2, totalUp: 1n, totalDown: 1n, lockPrice: 84000n * 10n ** 36n }), 110);
-  check(d.phase === 'open' && d.roundId === 10 && d.live?.roundId === 9 && d.live.phase === 'locked' && d.lockPrice === 84000,
-    'Round 10 takes bets while round 9 runs: the chart strike is round 9\'s');
-  d = LiveRounds.derive(R(9, { totalUp: 1n }), null, 101);
-  check(d.phase === 'next' && d.live === null, 'A one-sided round is never shown running (it is refunded)');
+  const iface = new ethers.Interface(HOUSE_ABI);
+  const BTC_ID = SUPPORTED_MARKETS.BTC.marketId;
+  const me = ethers.getAddress('0x000000000000000000000000000000000000a11c');
+  const other = ethers.getAddress('0x000000000000000000000000000000000000b0b0');
+  const e18 = (v) => ethers.parseEther(String(v));
+  let n = 0;
+  const log = (name, args) => {
+    const { data, topics } = iface.encodeEventLog(name, args);
+    n++;
+    return { data, topics, blockNumber: n, logIndex: 0, transactionHash: ethers.id(`tx${n}`), timestamp: 1790000000 + n };
+  };
+  const web3 = { iface, account: me, contractAddress: '0x0000000000000000000000000000000000000001', fetchHouse: async () => null, fetchPlayer: async () => ({}) };
+  const history = new ChainHistory(web3);
+  history.refreshHouse = async () => {};
+  const results = [];
+  const house = new HouseState({ web3, history, onUpdate: () => {}, onResult: (b) => results.push(b) });
+  house.readPlayer = async () => {};
+  const placed = (id, who, side, stake, startTs, dur, streakBet = true) =>
+    log('BetPlaced', [id, who, BTC_ID, side, e18(stake), e18(stake * 1.9), startTs, dur, streakBet]);
+  const settled = (id, who, status, paid, p0, p1, streak) =>
+    log('BetSettled', [id, who, BTC_ID, status, e18(paid), p0, p1, streak]);
+  await history.apply({
+    address: web3.contractAddress, head: 10,
+    logs: [placed(0, me, 1, 1, 1000, 30), placed(1, other, 2, 2, 1000, 30), settled(0, me, 2, 1.9, 100n, 101n, 1), settled(1, other, 3, 0, 100n, 101n, 0)]
+  });
+  check(results.length === 0, 'Results already on-chain when the page opens are not announced');
+  const mine = history.betsList(me);
+  check(mine.length === 1 && mine[0].status === 'Won' && mine[0].paid === 1.9 && mine[0].side === 'UP', 'A wallet sees only its own bets, with status and amount paid');
+  check(history.records.some((r) => r.type === 'win' && r.amount === 1.9) && !history.records.some((r) => r.type === 'win' && r.user.toLowerCase() === other.toLowerCase()), 'A win is a money record; a loss is not');
+
+  await history.apply({ address: web3.contractAddress, head: 20, logs: [placed(2, me, 2, 0.5, 2000, 10), log('PriceRecorded', [BTC_ID, 2000, 5000000000n, false])] });
+  const live = house.liveBet(BTC_ID);
+  check(live?.betId === 2 && house.strikeOf(live) === 50, 'Running bet on a market, with its recorded strike price');
+  check(house.phaseOf(live, 1999_000) === 'closed' && house.phaseOf(live, 2005_000) === 'locked' && house.phaseOf(live, 2011_000) === 'settling', 'Bet phases from its own times: before strike, running, waiting for the result');
+  await history.apply({ address: web3.contractAddress, head: 30, logs: [settled(2, me, 4, 0.5, 5000000000n, 5000000000n, 1)] });
+  check(results.length === 1 && results[0].betId === 2 && results[0].status === 'Push', 'A new settlement of the wallet\'s bet is announced once');
+  check(house.liveBet(BTC_ID) === null, 'No running bet once settled');
+
+  house.rules = { minLead: 5, jackpot: 10, jackpotShare: 0.25, jackpotCapMultiple: 20 };
+  check(house.nextStrikeAt(1790000001_000) === 1790000010_000 && house.nextStrikeAt(1790000006_000) === 1790000020_000, 'Next strike: the first 10 s mark at least 5 s ahead (as the contract computes it)');
+  check(house.jackpotFor(0.1) === 2 && house.jackpotFor(1) === 2.5, 'Jackpot preview: 25% of the pot, capped at 20x the smallest streak stake');
 }
 
 console.log('\n--- Report history lookup ---');
@@ -162,37 +130,6 @@ console.log('\n--- Report history lookup ---');
   let failed = false;
   try { await fetchReportsAt(['BTC'], t, { fetchImpl: async () => ({ ok: false, status: 513, statusText: 'too old' }) }); } catch (_) { failed = true; }
   check(failed, 'A gateway error is raised, not turned into an empty result');
-}
-
-console.log('\n--- Early result from the signed close report ---');
-{
-  const { API_CONFIG } = await import('../src/config.js');
-  API_CONFIG.priceRelayUrl = 'http://relay.test';
-  const oracleKeys = [1, 2, 3, 4, 5].map((i) => new ethers.SigningKey(ethers.id(`early-${i}`)));
-  const oracleAddrs = oracleKeys.map((k) => ethers.computeAddress(k.publicKey));
-  const closeTs = 1790444520;
-  const strike = 8406841000000n; // $84,068.41
-  const run = async (reports) => {
-    const results = [];
-    const lr = new LiveRounds({ web3: {}, history: null, onRoundEnd: (d) => results.push(d) });
-    lr.oracle = Promise.resolve({ set: new Set(oracleAddrs.map((a) => a.toLowerCase())), threshold: 4 });
-    lr.state = { marketKey: 'BTC', marketId: SUPPORTED_MARKETS.BTC.marketId, roundId: 7 };
-    globalThis.fetch = async () => ({ ok: true, json: async () => reports.map((r) => ({ value: String(r.value), timestampMs: String(r.timestampMs), signature: r.signature })) });
-    await lr.tryEarlyResult(`${SUPPORTED_MARKETS.BTC.marketId.toLowerCase()}:7`, SUPPORTED_MARKETS.BTC, closeTs, { roundId: 7, lockPrice: strike * 10n ** 28n });
-    return results;
-  };
-  const signed = (keys, value, ts = closeTs) => keys.map((k) => signReport(k, 'BTC', value, BigInt(ts) * 1000n));
-  let got = await run(signed(oracleKeys.slice(0, 4), 8405467000000n));
-  check(got.length === 1 && got[0].winner === 'DOWN' && got[0].confirming && close(got[0].closePrice, 84054.67),
-    'Four authorised signatures at the close second: Fall wins at $84,054.67, marked as confirming on-chain');
-  got = await run(signed(oracleKeys.slice(0, 3), 8405467000000n));
-  check(got.length === 0, 'Three signatures (below the contract threshold): no early result');
-  got = await run([...signed(oracleKeys.slice(0, 3), 8499999000000n), ...signed([new ethers.SigningKey(ethers.id('rogue'))], 8499999000000n)]);
-  check(got.length === 0, 'A report from an unknown signer: no early result');
-  got = await run(signed(oracleKeys.slice(0, 4), 8499999000000n, closeTs + 10));
-  check(got.length === 0, 'Reports for another second: no early result');
-  got = await run(signed(oracleKeys.slice(0, 4), strike));
-  check(got.length === 1 && got[0].winner === 'REFUND', 'Close equal to the strike: a tie (refund), as the contract decides');
 }
 
 console.log('\n--- Price sanity ---');

@@ -108,23 +108,9 @@ export function getApiConfig() {
   return API_CONFIG;
 }
 
-// Typical gas per action, measured with scripts/gas_report.js on the deployed contract. Monad charges
-// the gas limit, so the app shows fee estimates from these and the live gas price (+10% margin).
-export const TYPICAL_GAS = {
-  bet: 135000,          // first bet on a side (joining or adding costs less)
-  betNewRound: 230000,  // bet that replaces an expired one-sided round
-  claim: 50000
-};
-
-// Markets. `feed` is the RedStone data feed id the contract verifies reports for;
-// marketId = keccak256(abi.encodePacked(bytes32(feed), symbol, roundDuration)).
-// Round timing, applied to the contract by npm run deploy and npm run markets (no redeploy needed to
-// retune). A first bet opens a round; its strike is the first 10 s report mark at least
-// bettingWindow seconds later, betting closes lockBuffer seconds before the strike, and the result
-// is roundDuration seconds after the strike. The next round opens with the next bet as soon as this
-// one stops taking bets (continuous play).
-export const ROUND_RULES = { bettingWindow: 10, lockBuffer: 5 };
-
+// Markets. `feed` is the RedStone data feed id the contract verifies reports for. marketId is the
+// id the house contract registers the market under (setMarket, owner only). Bet rules (multiplier,
+// minimum, house limit, lengths) and network fees are read from the chain, never set here.
 export const SUPPORTED_MARKETS = {
   BTC: {
     marketId: '0x3f2c6b072f0d9130d909f43afc36353b37725d468aa5ba558e74e348d02a6476',
@@ -135,9 +121,6 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'btcusdt@ticker',
     binanceTradeStream: 'btcusdt@trade',
     decimals: 2,
-    roundDuration: 20,
-    minBet: 0.1,
-    maxBet: 5000.0,
     icon: '₿',
     accentColor: '#f7931a'
   },
@@ -150,9 +133,6 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'ethusdt@ticker',
     binanceTradeStream: 'ethusdt@trade',
     decimals: 2,
-    roundDuration: 20,
-    minBet: 0.1,
-    maxBet: 5000.0,
     icon: 'Ξ',
     accentColor: '#627eea'
   },
@@ -165,9 +145,6 @@ export const SUPPORTED_MARKETS = {
     binanceStream: 'solusdt@ticker',
     binanceTradeStream: 'solusdt@trade',
     decimals: 2,
-    roundDuration: 20,
-    minBet: 0.1,
-    maxBet: 5000.0,
     icon: '◎',
     accentColor: '#14f195'
   },
@@ -180,9 +157,6 @@ export const SUPPORTED_MARKETS = {
     binanceStream: null,
     binanceTradeStream: null,
     decimals: 4,
-    roundDuration: 20,
-    minBet: 1.0,
-    maxBet: 25000.0,
     icon: 'M',
     accentColor: '#836ef9'
   }

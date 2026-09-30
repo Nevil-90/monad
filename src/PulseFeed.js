@@ -1,7 +1,7 @@
 /**
  * PulseFeed.js
- * Data for the Pulse board, all from ChainHistory: the contract's all-time totalWinnings counters,
- * and wins claimed on-chain (never refunds) for the feed.
+ * Data for the Pulse board, all from ChainHistory: the streak jackpot and house totals read from the
+ * contract, and recent wins and jackpots (never refunds) for the feed.
  */
 
 const MAX_FEED = 12;
@@ -16,35 +16,31 @@ export class PulseFeed {
 
   refresh() {
     const h = this.history;
-    const stakeOf = new Map();
-    for (const r of h.records) {
-      if (r.type !== 'bet') continue;
-      const k = `${r.marketId}:${r.roundId}:${r.user.toLowerCase()}`;
-      stakeOf.set(k, (stakeOf.get(k) || 0) + r.amount);
-    }
     const account = this.web3.account ? this.web3.account.toLowerCase() : null;
-    const wins = h.records.filter((r) => r.type === 'win').map((r) => {
-      const stake = stakeOf.get(`${r.marketId}:${r.roundId}:${r.user.toLowerCase()}`);
-      const round = h.rounds.get(`${r.marketId}:${r.roundId}`);
+    const feed = h.records.filter((r) => r.type === 'win' || r.type === 'jackpot').map((r) => {
+      const bet = h.bets.get(r.betId);
       return {
         key: r.id,
         user: `${r.user.slice(0, 6)}…${r.user.slice(-4)}`,
         you: account === r.user.toLowerCase(),
-        side: round?.winningSide ?? null,
-        market: h.marketLabel(r.marketId),
+        jackpot: r.type === 'jackpot',
+        streak: r.streak ?? null,
+        side: r.type === 'win' ? bet?.side ?? null : null,
+        market: bet ? h.marketLabel(bet.marketId) : 'Streak',
         amount: r.amount,
-        time: h.blockTimes.get(r.block) ?? null, // ms, from the block the claim landed in
-        mult: stake ? r.amount / stake : null
+        time: r.time ?? h.blockTimes.get(r.block) ?? null,
+        mult: r.type === 'win' && bet?.stake ? r.amount / bet.stake : null
       };
     });
-    const topMult = wins.reduce((mx, w) => Math.max(mx, w.mult || 0), 0);
-    const rounds = h.roundsList().filter((r) => r.status === 'settled').length;
+    const house = h.house;
+    const mon = (v) => (v === undefined || v === null ? null : Number(v) / 1e18);
     this.onUpdate({
-      ready: h.status === 'live',
-      paid: h.totals.paidToWinners,
-      rounds,
-      topMult,
-      feed: wins.slice(0, MAX_FEED)
+      ready: h.status === 'live' && Boolean(house),
+      jackpot: mon(house?.jackpotPot),
+      jackpotStreak: house ? Number(house.jackpotStreak) : null,
+      paid: mon(house?.totalPaidOut),
+      settled: house ? Number(house.betsSettled) : null,
+      feed: feed.slice(0, MAX_FEED)
     });
   }
 }

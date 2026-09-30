@@ -7,8 +7,8 @@
  *                                  delivers them. The Dashboard, round view and fee display run on it.
  *   GET /events?after=BLOCK        The same backlog as one JSON response
  *   GET /reports?feed=BTC&ts=SEC   Signed RedStone reports for that report time, ready for
- *                                  lockRoundWithUpdate / settleRoundWithUpdate (fetched once from the
- *                                  gateway's 24 h history and cached), so anyone can lock or settle
+ *                                  recordAndSettle (fetched once from the gateway's 24 h history and
+ *                                  cached), so anyone can settle a bet and the app can show a result early
  *   GET /health                    Stream, index and report-lookup status
  *
  * Why a relay at all: Monad RPCs serve at most 100 blocks per log request, too slow for every browser
@@ -23,7 +23,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { SUPPORTED_MARKETS, getConfig } from '../src/config.js';
 import { ethers } from 'ethers';
-import { AMM_ABI } from '../src/contracts/AMMAbi.js';
+import { HOUSE_ABI } from '../src/contracts/HouseAbi.js';
 import { MonadRpcProvider } from '../src/rpc.js';
 import { ReportSource } from './lib/report_source.js';
 import { EventIndex } from './lib/event_index.js';
@@ -43,7 +43,7 @@ let events = null;
 let reportSource = null;
 if (net.contractAddress && net.deployBlock !== null) {
   // Serve reports for the contract's own signer set and threshold (read once)
-  const amm = new ethers.Contract(net.contractAddress, AMM_ABI, new MonadRpcProvider(net.rpcUrl, net.chainId));
+  const amm = new ethers.Contract(net.contractAddress, HOUSE_ABI, new MonadRpcProvider(net.rpcUrl, net.chainId));
   const [signers, threshold] = await Promise.all([amm.oracleSigners(), amm.signerThreshold()]);
   reportSource = new ReportSource({ feeds, signers, threshold: Number(threshold) });
   events = new EventIndex({

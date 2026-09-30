@@ -1,7 +1,7 @@
 /**
  * main.js
- * Horizon UI controller: wires market data, the contract's rounds, the wallet and the canvas together.
- * Everything shown comes from the contract (via LiveRounds / ChainHistory) or the price feeds.
+ * Horizon UI controller: wires market data, the house contract, the wallet and the canvas together.
+ * Everything shown comes from the contract (via HouseState / ChainHistory) or the price feeds.
  */
 
 import { ethers } from 'ethers';
@@ -11,8 +11,8 @@ import { Web3Manager } from './Web3Manager.js';
 import { PulseFeed } from './PulseFeed.js';
 import { ChainHistory } from './ChainHistory.js';
 import { Dashboard } from './Dashboard.js';
-import { LiveRounds } from './LiveRounds.js';
-import { getConfig, API_CONFIG, SUPPORTED_MARKETS, TYPICAL_GAS } from './config.js';
+import { HouseState } from './HouseState.js';
+import { getConfig, SUPPORTED_MARKETS, API_CONFIG } from './config.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -26,7 +26,9 @@ const fmtClock = (sec) => {
 const sideName = (side) => (side === 'UP' ? 'Rise' : 'Fall');
 const shortAddr = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const RING_LENGTH = 2 * Math.PI * 10;
-const plural = (n, word) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
+// A result normally settles ~2 s after it is signed. Past this, the player can settle it themselves, so a
+// late or absent keeper (run by the house) can never hold a winning bet back.
+const SELF_SETTLE_AFTER_S = 20;
 
 /** Animate a number from its last shown value to `to` */
 function countTo(node, to, decimals = 2, duration = 1200) {
@@ -66,8 +68,6 @@ export function startApp() {
     ledger: $('ledger'),
     scrim: $('scrim'),
     positionChip: $('position-chip'),
-    positionGlyph: $('position-glyph'),
-    positionText: $('position-text'),
     result: $('result'),
     resultTitle: $('result-title'),
     resultSub: $('result-sub'),
@@ -80,15 +80,13 @@ export function startApp() {
     upWin: $('up-win'),
     downWin: $('down-win'),
     stake: $('stake-input'),
-    tugUp: $('tug-up'),
-    tugDown: $('tug-down'),
-    tugUpLabel: $('tug-up-label'),
-    tugDownLabel: $('tug-down-label'),
-    tugTotal: $('tug-total'),
+    bankVal: $('bank-val'),
+    rideBtn: $('ride-btn'),
+    cashoutBtn: $('cashout-btn'),
     ringFill: $('phase-ring-fill'),
     phaseLabel: $('phase-label'),
     phaseTime: $('phase-time'),
-    roundId: $('round-id'),
+    maxBet: $('round-id'),
     feedDot: $('feed-dot'),
     feedLatency: $('feed-latency'),
     positionsList: $('positions-list'),
@@ -101,7 +99,7 @@ export function startApp() {
 
   let dashboard = null; // created after the wallet, which re-renders it on connect
   let chainHistory = null; // contract event reader, shared by the Dashboard, Pulse board and results strip
-  let liveRounds = null;   // the active market's on-chain round and the wallet's positions
+  let house = null;        // house rules, the wallet's balance, streak and bets
   let pulse = null;
   let marketButtons = [...document.querySelectorAll('#market-switch .market')];
 
@@ -161,7 +159,7 @@ export function startApp() {
       dashboard?.render();
       if (networkError) toast('Wrong network', networkError, { error: true });
       else if (!silent) toast('Wallet connected', `${wallet?.name ? `${wallet.name} · ` : ''}${shortAddr(account)} on ${getConfig().name}`);
-      liveRounds?.sync();
+      house?.readPlayer();
       pulse?.refresh();
       renderLedger();
     },
@@ -170,20 +168,15 @@ export function startApp() {
       paintOdds();
     },
     txPending: ({ side, amount }) => {
-      const st = liveRounds?.state;
-      const left = st && st.phase === 'open' ? Math.floor((st.betCloseAt - Date.now()) / 1000) : null;
-      toast('Confirm in your wallet', left !== null && left < 25
-        ? `${amount} MON on ${sideName(side)} · bets close in ${left}s: a bet that arrives later fails and still pays the network fee`
-        : `${amount} MON on ${sideName(side)}`, { sticky: true });
+      const q = quotes[side];
+      toast('Confirm in your wallet', `${fmtMon(amount)} MON on ${sideName(side)} · ${duration}s · pays ${q && q.stake === amount ? fmtMon(q.payout) : '—'} MON`, { sticky: true });
     },
     txSuccess: ({ txHash, side, amount }) => {
-      toast('Bet sent', `${amount} MON on ${sideName(side)}`, { link: `${getConfig().explorerUrl}/tx/${txHash}` });
-    },
-    txError: (error) => {
-      toast('Transaction failed', error || 'Rejected in wallet', { error: true });
+      toast('Bet placed', `${fmtMon(amount)} MON on ${sideName(side)} · the strike is set in a few seconds`, { link: `${getConfig().explorerUrl}/tx/${txHash}` });
     },
     accountChanged: (account) => {
       el.walletLabel.textContent = shortAddr(account);
+      house?.readPlayer();
       dashboard?.render();
       pulse?.refresh();
       renderLedger();
@@ -201,6 +194,7 @@ export function startApp() {
       el.walletBtn.classList.remove('connected');
       el.balance.textContent = '—';
       dashboard?.render();
+      house?.readPlayer();
       renderLedger();
     }
   });
@@ -316,45 +310,32 @@ export function startApp() {
     openModal('wallet-modal');
   }
 
-  // Contract parameters, read once without a wallet: fee and minimum bet (null until read)
-  let protocolFeeBps = null;
-  let minBetMon = null;
+  // Stake starts at the contract's minimum (rounded up to 0.1 MON) unless the user already typed one
   let stakeEdited = false;
+  let stakeSeeded = false;
+  let betPending = null; // 'UP' | 'DOWN' while the wallet is asked to confirm a bet
+  let cashingOut = false; // while the wallet is asked to confirm a cash-out
   el.stake.addEventListener('input', (e) => { if (e.isTrusted) stakeEdited = true; });
-  async function loadProtocolParameters() {
-    const p = await web3.fetchLiveProtocolFees();
-    if (p?.totalFeeBps !== undefined) {
-      protocolFeeBps = p.totalFeeBps;
-      $('guide-fee').textContent = `${(protocolFeeBps / 100).toFixed(1)}%`;
-      bootStep('network');
-    }
-    if (p?.minBetWei !== undefined) {
-      minBetMon = Number(ethers.formatEther(p.minBetWei));
-      // Start at the contract's minimum (rounded up to 0.1 MON) unless the user already typed a stake
-      if (!stakeEdited) {
-        el.stake.value = String(Math.ceil(minBetMon * 10) / 10);
-        el.stake.dispatchEvent(new Event('input'));
-        stakeEdited = false;
-      }
-    }
-    if (p?.lockBufferSeconds !== undefined && p?.priceWindowSeconds !== undefined) {
-      roundRules = { lockBuffer: p.lockBufferSeconds, priceWindow: p.priceWindowSeconds, bettingWindow: p.bettingWindowSeconds ?? 0 };
-    }
+  function seedStake() {
+    const r = house?.rules;
+    if (!r || stakeSeeded || stakeEdited) return;
+    stakeSeeded = true;
+    el.stake.value = String(Math.ceil(r.minBet * 10) / 10);
   }
 
-  // Timeline a bet would start right now, by the contract's rules (_startRound): the strike locks on
-  // the first report-grid mark one round length ahead, betting closes lockBuffer before it, and the
-  // round settles one round length after the strike. Shown while no round is running.
-  let roundRules = null;
-  function projectedRound(duration, nowMs) {
-    if (!roundRules) return null;
-    const half = Math.floor(duration / 2);
-    const w = Math.min(roundRules.priceWindow, half);
-    const betting = roundRules.bettingWindow || duration;
-    const lock = Math.ceil((Math.floor(nowMs / 1000) + betting) / w) * w;
-    const buffer = Math.min(roundRules.lockBuffer, half, Math.floor(betting / 2));
-    return { betCloseAt: (lock - buffer) * 1000, lockAt: lock * 1000, closeAt: (lock + duration) * 1000 };
+  // Bet length in seconds (10, 30 or 60), remembered per browser
+  let duration = 30;
+  function setDuration(sec) {
+    duration = [10, 30, 60].includes(sec) ? sec : 30;
+    document.querySelectorAll('.dur-btn').forEach((b) => {
+      const on = Number(b.dataset.dur) === duration;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    try { localStorage.setItem('mp.duration', String(duration)); } catch (_) { /* storage unavailable */ }
+    tickHouse();
   }
+  document.querySelectorAll('.dur-btn').forEach((b) => b.addEventListener('click', () => setDuration(Number(b.dataset.dur))));
 
   // ---------------------------------------------------------------------------
   // Modals & drawer
@@ -363,7 +344,7 @@ export function startApp() {
 
   // How it works: shown once on the first visit, reopened from the ? button or the ? key
   function openGuide() {
-    $('guide-fee').textContent = protocolFeeBps === null ? '—' : `${(protocolFeeBps / 100).toFixed(1)}%`;
+    $('guide-fee').textContent = house?.rules ? `${house.payoutAt(0.5 - house.rules.band).toFixed(2)}×` : '—';
     openModal('guide-modal');
     try { localStorage.setItem('mp.seenGuide', '1'); } catch (_) { /* storage unavailable */ }
   }
@@ -397,64 +378,6 @@ export function startApp() {
   });
 
   // ---------------------------------------------------------------------------
-  // Create market
-  // ---------------------------------------------------------------------------
-  let createDuration = 300;
-  $('open-create').addEventListener('click', () => {
-    $('cm-error').classList.add('hidden');
-    openModal('create-modal');
-  });
-  document.querySelectorAll('#cm-duration .seg').forEach((seg) => {
-    seg.addEventListener('click', () => {
-      document.querySelectorAll('#cm-duration .seg').forEach((s) => s.classList.toggle('active', s === seg));
-      createDuration = parseInt(seg.dataset.sec, 10);
-    });
-  });
-
-  $('create-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const name = $('cm-name').value.trim();
-    const symbol = $('cm-symbol').value.trim().toUpperCase();
-    const feed = $('cm-feed').value.trim();
-    const errorEl = $('cm-error');
-    const fail = (msg) => { errorEl.textContent = msg; errorEl.classList.remove('hidden'); };
-
-    if (!name) return fail('Enter an asset name.');
-    if (!/^[A-Z0-9][A-Z0-9/ .-]{0,15}$/.test(symbol)) return fail('Enter a symbol such as SUI/USD.');
-    if (!/^[A-Za-z0-9_]{1,31}$/.test(feed)) return fail('The feed ID is a RedStone feed name such as SUI (letters, digits, underscores).');
-    if (!web3.account) return fail('Connect a wallet to create a market.');
-
-    errorEl.classList.add('hidden');
-    const submit = $('cm-submit');
-    submit.disabled = true;
-    submit.textContent = 'Confirm in wallet…';
-    const res = await web3.createMarket(feed, name, symbol, createDuration);
-    submit.disabled = false;
-    submit.textContent = 'Create market';
-    if (!res.success) return fail(res.error || 'Transaction rejected.');
-
-    closeModal('create-modal');
-    toast('Market created', `${symbol} is live on-chain. It is listed here once verified.`, {
-      link: `${getConfig().explorerUrl}/tx/${res.txHash}`
-    });
-  });
-
-  $('claim-royalties').addEventListener('click', async () => {
-    if (!web3.account) {
-      toast('Connect a wallet', 'Creator fees are paid on-chain to the wallet that created the market.');
-      return;
-    }
-    const m = amm.getActiveMarket();
-    const res = await web3.claimCreatorFees(m.marketId);
-    if (!res.success) {
-      toast('Nothing to claim', `No creator fees for ${m.symbol} on this wallet.`, { error: true });
-      return;
-    }
-    toast('Creator fees claimed', m.symbol, { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
-    web3.fetchBalance();
-  });
-
-  // ---------------------------------------------------------------------------
   // Canvas
   // ---------------------------------------------------------------------------
   const engine = new HorizonEngine(el.canvas);
@@ -474,10 +397,10 @@ export function startApp() {
     const chip = chipRect ? { top: y(chipRect.top), bottom: y(chipRect.bottom) } : null;
     const chipOnTop = chip && chip.top < H / 2;
     const readoutBottom = y(el.readout.getBoundingClientRect().bottom);
-    const top = Math.max(readoutBottom, chipOnTop ? chip.bottom : 0) + 36;
+    const top = Math.max(readoutBottom, chipOnTop ? chip.bottom : 0) + 14;
     const ticker = $('pulse-ticker');
     const tickerTop = ticker.classList.contains('hidden') ? Infinity : y(ticker.getBoundingClientRect().top);
-    const bottom = Math.min(consoleTop, chip && !chipOnTop ? chip.top : Infinity, tickerTop) - 30;
+    const bottom = Math.min(consoleTop, chip && !chipOnTop ? chip.top : Infinity, tickerTop) - 12;
     engine.setSafeArea(top / H, bottom / H);
 
     const pulseRect = $('pulse').getBoundingClientRect();
@@ -523,341 +446,447 @@ export function startApp() {
     lastHeroPrice = price;
   }
 
-  // The chart is an exchange price (Coinbase); the round is decided by RedStone's signed price at the
-  // close time, the median of several sources. They agree to a few hundredths of a percent, so a
+  // The chart is an exchange price (Coinbase); a bet is decided by RedStone's signed price at its
+  // result time, the median of several sources. They agree to a few hundredths of a percent, so a
   // position closer to the strike than CLOSE_CALL_PCT is shown as too close to call, not as winning.
   const CLOSE_CALL_PCT = 0.02;
   const closeCall = (price, strike) => Math.abs((price - strike) / strike) * 100 < CLOSE_CALL_PCT;
 
+  function activeMarketId() {
+    return SUPPORTED_MARKETS[amm.activeMarketKey]?.marketId || null;
+  }
+
+  /** The wallet's running bet on the active market, with its strike once recorded */
+  function liveBet() {
+    const id = activeMarketId();
+    return id && house ? house.liveBet(id) : null;
+  }
+
   function paintReadout(market, price) {
     const d = market.decimals;
-    const ref = price;
     el.heroPrice.textContent = price === null ? '—' : fmtPrice(price, d);
     const chg = market.change24h ?? null;
     el.assetChange.textContent = `${fmtChange(chg)} 24h`;
     el.assetChange.className = `asset-change num ${chg === null ? '' : chg >= 0 ? 'pos' : 'neg'}`;
 
-    if (market.lockPrice) {
-      el.strikeVal.textContent = fmtPrice(market.lockPrice, d);
+    const bet = liveBet();
+    const strike = bet ? house.strikeOf(bet) : null;
+    if (strike) {
+      el.strikeVal.textContent = fmtPrice(strike, d);
       el.strikeVal.classList.add('locked');
-      if (ref === null) {
+      if (price === null) {
         el.gapVal.textContent = '—';
         el.gapVal.className = 'cell-val num';
       } else {
-        const gap = ref - market.lockPrice;
-        const pct = (gap / market.lockPrice) * 100;
+        const gap = price - strike;
+        const pct = (gap / strike) * 100;
         el.gapVal.textContent = `${gap >= 0 ? '▲ +' : '▼ −'}${Math.abs(gap).toFixed(d)} (${Math.abs(pct).toFixed(3)}%)`;
         el.gapVal.className = `cell-val num ${gap > 0 ? 'above' : gap < 0 ? 'below' : ''}`;
       }
+      return;
+    }
+    el.strikeVal.classList.remove('locked');
+    el.gapVal.textContent = '—';
+    el.gapVal.className = 'cell-val num';
+    const now = Date.now();
+    if (bet) {
+      const toStrike = (bet.startTs * 1000 - now) / 1000;
+      el.strikeVal.textContent = toStrike > 0 ? `Sets in ${fmtClock(toStrike)}` : 'Setting…';
     } else {
-      const st = liveRounds?.state;
-      // The running round's strike if one is about to lock, else the round taking bets
-      const lockAt = st?.live ? st.live.lockAt : st?.lockAt;
-      const toLock = lockAt ? (lockAt - Date.now()) / 1000 : null;
-      el.strikeVal.textContent = !st || st.error ? '—'
-        : !st.live && st.phase === 'next' ? 'Set after the next bet'
-        : toLock > 0 ? `Sets in ${fmtClock(toLock)}` : 'Setting…';
-      el.strikeVal.classList.remove('locked');
-      el.gapVal.textContent = '—';
-      el.gapVal.className = 'cell-val num';
+      const next = house?.nextStrikeAt(now);
+      el.strikeVal.textContent = next ? `Next ${fmtClock((next - now) / 1000)}` : '—';
     }
   }
 
-  const postBetMultiplier = (side, stake) => amm.multiplierAfter(side, stake);
-
-  // Whole MON for big pools; small pools (real testnet bets) keep their decimals instead of showing 0
-  const fmtPool = (v) => (v >= 100 ? Math.round(v).toLocaleString('en-US') : v.toLocaleString('en-US', { maximumFractionDigits: 2 }));
-
-  // Live mode: what a bet and a later claim cost in network fees, from typical gas and the live gas price.
-  // Shown before betting, with a warning when fees are a large share of the stake (SEC-26).
-  // The gas price is pushed by the relay whenever the chain's base fee changes (no polling)
+  // Network fee of the bet as set up now, from the chain: the node's gas estimate for this exact call
+  // from this wallet (+10%, the limit it is sent with; Monad charges the full limit) times the gas
+  // price the relay pushes from the chain. Re-estimated when the stake, length, market, balance or gas
+  // price changes. Settlement is paid by the keeper and wins need no claim, so this is the only fee.
   let gasPriceWei = null;
+  let feeKey = null;
+  let feeTimer = null;
 
   function paintFee(stake) {
     const node = $('stake-fee');
-    const st = liveRounds?.state;
-    if (!gasPriceWei || !st || st.error) {
-      node.classList.add('hidden');
+    const r = house?.rules;
+    const outOfRange = r && (stake < r.minBet || stake > r.maxStake);
+    if (!web3.account || !r || stake <= 0 || outOfRange) {
+      feeKey = null;
+      node.classList.toggle('hidden', !r);
+      node.classList.remove('warn');
+      node.textContent = web3.account ? '' : 'Network fee: from the chain once you connect';
+      node.classList.toggle('hidden', !r || (Boolean(web3.account) && (stake <= 0 || outOfRange)));
       return;
     }
-    const mon = (gas) => (Number(gas) * 1.1 * Number(gasPriceWei)) / 1e18;
-    const betFee = mon(st.phase === 'next' || st.phase === 'idle' ? TYPICAL_GAS.betNewRound : TYPICAL_GAS.bet);
-    const claimFee = mon(TYPICAL_GAS.claim);
-    const share = stake > 0 ? ((betFee + claimFee) / stake) * 100 : null;
-    node.classList.remove('hidden');
-    node.classList.toggle('warn', share !== null && share > 5);
-    node.textContent = `Network fees ≈ ${betFee.toFixed(3)} + ${claimFee.toFixed(3)} MON (bet + claim)`
-      + (share !== null && share > 5 ? ` · ${share.toFixed(0)}% of stake` : '');
-    node.title = 'Paid to the Monad network to place and to claim a bet. Not refundable, even if the round is.';
+    let params;
+    try {
+      params = betParams('UP', stake);
+    } catch (_) {
+      return;
+    }
+    const key = [stake, duration, params.marketId, params.balanceWei, gasPriceWei, web3.account].join(':');
+    if (key === feeKey) return;
+    feeKey = key;
+    node.classList.remove('hidden', 'warn');
+    node.textContent = 'Network fee: asking the chain…';
+    clearTimeout(feeTimer);
+    feeTimer = setTimeout(async () => {
+      try {
+        const { gasLimit, gasPriceWei: price, feeWei } = await web3.estimateBetFee({ ...params, minPayoutWei: 0n }, gasPriceWei);
+        if (feeKey !== key) return;
+        const fee = Number(ethers.formatEther(feeWei));
+        const share = (fee / stake) * 100;
+        node.classList.toggle('warn', share > 5);
+        node.textContent = `Network fee ${fee.toFixed(4)} MON` + (share > 5 ? ` · ${share.toFixed(0)}% of stake` : '');
+        node.title = `From the chain: ${gasLimit.toLocaleString('en-US')} gas × ${ethers.formatUnits(price, 'gwei')} gwei. Paid to the Monad network to place the bet; wins are credited automatically, with no claim fee.`;
+      } catch (err) {
+        if (feeKey !== key) return;
+        node.classList.add('warn');
+        node.textContent = err.message.replace(/^The contract rejected this: /, 'Would be rejected: ');
+        node.title = 'The chain simulated this bet and it would not go through.';
+      }
+    }, 350);
   }
 
-  function paintOdds() {
-    const m = amm.getActiveMarket();
-    const odds = amm.getLiveOdds();
+  /** The bet as the contract takes it: stake from the in-game balance first, the rest from the wallet */
+  function betParams(side, amount) {
+    const r = house.rules;
+    const stakeWei = toWei(amount);
+    const balanceWei = house.player?.balanceWei ?? 0n;
+    const fromBalance = balanceWei < stakeWei ? balanceWei : stakeWei;
+    return {
+      side,
+      marketId: activeMarketId(),
+      duration,
+      walletWei: stakeWei - fromBalance,
+      balanceWei: fromBalance,
+      // The quoted payout, with 2% room for other bets in the window landing first; past that the
+      // contract refuses the bet instead of paying less than the player agreed to
+      minPayoutWei: quotes[side] && quotes[side].stake === amount ? (quotes[side].payoutWei * 98n) / 100n : null
+    };
+  }
+
+  // Live quotes from the contract for the stake, market and length on screen: odds move with the
+  // betting in each window, so they are re-read when any of those, the window, or its bets change
+  let quotes = { UP: null, DOWN: null };
+  let quoteKey = null;
+  let quoteTimer = null;
+  let windowVersion = 0;
+  function refreshQuotes() {
+    const r = house?.rules;
     const stake = parseFloat(el.stake.value) || 0;
-    const balance = currentBalance();
+    const marketId = activeMarketId();
+    if (!r || stake <= 0 || !marketId) {
+      quotes = { UP: null, DOWN: null };
+      quoteKey = null;
+      return;
+    }
+    const key = [marketId, duration, stake, house.nextStrikeAt(), windowVersion].join(':');
+    if (key === quoteKey) return;
+    quoteKey = key;
+    clearTimeout(quoteTimer);
+    quoteTimer = setTimeout(async () => {
+      try {
+        const stakeWei = toWei(stake);
+        const [up, down] = await Promise.all(['UP', 'DOWN'].map((side) => web3.fetchQuote(marketId, side, duration, stakeWei)));
+        if (key !== quoteKey) return;
+        const shape = (q) => ({
+          stake,
+          payoutWei: q.payout,
+          payout: Number(ethers.formatEther(q.payout)),
+          refused: q.refused,
+          priceBps: Number(q.priceBps),
+          up: Number(ethers.formatEther(q.upShares)),
+          down: Number(ethers.formatEther(q.downShares))
+        });
+        quotes = { UP: shape(up), DOWN: shape(down) };
+      } catch (err) {
+        if (key !== quoteKey) return;
+        quotes = { UP: null, DOWN: null };
+        console.warn('Could not read the odds:', err.message);
+      }
+      paintOdds();
+    }, 200);
+  }
+
+  // Contract reasons, in the player's words
+  const REFUSED = {
+    'Odds at limit on this side': 'This side is full for this round: try the other side or the next strike',
+    'Bet exceeds house limit': 'Above the house limit for one bet',
+    'Bet below minimum': 'Below the minimum bet',
+    Paused: 'Paused by the house',
+    'Market inactive': 'This market is closed'
+  };
+  // 6 decimals: a float's 18-digit expansion carries noise (0.1 -> 0.100000000000000006)
+  const toWei = (mon) => ethers.parseEther(mon.toFixed(6));
+
+  const inGame = () => house?.player?.balance ?? 0;
+
+  function paintOdds() {
+    const r = house?.rules;
+    const stake = parseFloat(el.stake.value) || 0;
+    const wallet = currentBalance();
     paintFee(stake);
 
     for (const side of ['UP', 'DOWN']) {
       const multEl = side === 'UP' ? el.upMult : el.downMult;
       const winEl = side === 'UP' ? el.upWin : el.downWin;
-      const mult = stake > 0 ? postBetMultiplier(side, stake) : (side === 'UP' ? odds.multUp : odds.multDown);
-      const opposingPool = side === 'UP' ? m.poolDown : m.poolUp;
-      multEl.textContent = mult && opposingPool > 0 ? `${mult.toFixed(2)}×` : '—';
-      if (amm.feeBps === null) winEl.textContent = 'Reading the round…';
-      else if (opposingPool <= 0) winEl.textContent = `Refunded unless someone takes ${side === 'UP' ? 'Fall' : 'Rise'}`;
+      const q = quotes[side] && quotes[side].stake === stake ? quotes[side] : null;
+      multEl.textContent = q && !q.refused ? `${(q.payout / stake).toFixed(2)}×` : '—';
+      (side === 'UP' ? el.betUp : el.betDown).classList.toggle('waiting', betPending === side);
+      if (betPending === side) winEl.textContent = 'Confirm in your wallet…';
+      else if (!r) winEl.textContent = house?.error ? 'House unavailable' : 'Opening the house…';
+      else if (r.paused) winEl.textContent = 'Paused by the house';
+      else if (r.minBet > r.maxStake) winEl.textContent = 'Vault too small for the minimum bet';
       else if (stake <= 0) winEl.textContent = 'Enter a stake';
-      else if (balance !== null && stake > balance) winEl.textContent = 'Above balance';
-      else {
-        // Profit can be negative: when your stake dominates the pool, the fee exceeds what you win
-        const profit = stake * mult - stake;
-        winEl.innerHTML = `Pays ≈ ${fmtMon(stake * mult)} <span class="profit${profit < 0 ? ' loss' : ''}">${profit < 0 ? '−' : '+'}${fmtMon(Math.abs(profit))}</span>`;
+      else if (stake < r.minBet) winEl.textContent = `Min bet ${fmtMon(r.minBet)} MON`;
+      else if (stake > r.maxStake) winEl.textContent = `Max bet ${fmtMon(r.maxStake)} MON`;
+      else if (wallet !== null && stake > wallet + inGame()) winEl.textContent = 'Above your balance';
+      else if (!q) winEl.textContent = 'Reading the odds…';
+      else if (q.refused) winEl.textContent = REFUSED[q.refused] || q.refused;
+      else winEl.innerHTML = `Pays ${fmtMon(q.payout)} <span class="profit">+${fmtMon(q.payout - stake)}</span>`;
+    }
+    // Who backs what in the window this bet joins
+    // The window's lean: the market maker's price of Rise (50% = even). Where players have leaned, the
+    // other side pays more.
+    const qu = quotes.UP;
+    const lean = $('lean');
+    if (qu && qu.priceBps && qu.priceBps !== 5000) {
+      const upPct = qu.priceBps / 100;
+      $('lean-up').style.width = `${upPct}%`;
+      $('lean-down').style.width = `${100 - upPct}%`;
+      const favoured = upPct > 50 ? 'Fall' : 'Rise';
+      $('lean-label').textContent = `leans ${upPct > 50 ? 'Rise' : 'Fall'} ${Math.round(Math.max(upPct, 100 - upPct))}% · ${favoured} pays more`;
+      lean.classList.remove('hidden');
+    } else {
+      lean.classList.add('hidden');
+    }
+    refreshQuotes();
+    el.maxBet.textContent = r ? `${fmtMon(r.maxStake)} MON` : '—';
+
+    // In-game balance: winnings wait here to ride again or cash out
+    const p = house?.player;
+    el.bankVal.textContent = p ? `${fmtMon(p.balance)} MON` : '—';
+    $('bank').classList.toggle('has-balance', Boolean(p && p.balance > 0));
+    el.rideBtn.disabled = !(p && r && p.balance >= r.minBet);
+    el.cashoutBtn.disabled = !(p && p.balance > 0) || cashingOut;
+    el.cashoutBtn.textContent = cashingOut ? 'Confirm in wallet…' : 'Cash out';
+
+    // House pane
+    if (r) {
+      const lo = house.payoutAt(0.5 + r.band);
+      const hi = house.payoutAt(0.5 - r.band);
+      $('stat-pool').textContent = `${house.payoutAt(0.5).toFixed(2)}× even · ${lo.toFixed(2)}–${hi.toFixed(2)}× · ${(r.winFee * 100).toFixed(0)}% fee on wins`;
+      $('stat-split').textContent = `${fmtMon(r.vault)} MON`;
+      $('stat-impact').textContent = `${fmtMon(r.reserved)} MON`;
+      $('stat-fee').textContent = `${fmtMon(r.minBet)} – ${fmtMon(r.maxStake)} MON`;
+      $('house-note').textContent = `Every bet is against this vault. A win is paid from it, a loss goes into it. `
+        + `So the vault can always pay, the full payout of every open bet is set aside ("reserved"), and one bet `
+        + `may win at most ${(r.maxWin * 100).toFixed(0)}% of what is not reserved: that is the max bet. A bigger vault takes bigger bets.`;
+      const shares = p?.shares ?? 0n;
+      const total = r.totalShares ?? 0n;
+      const share = total > 0n ? Number((shares * 1000000n) / total) / 10000 : 0;
+      $('lp-share').textContent = p ? `${share.toFixed(2)}%` : '—';
+      // What a withdrawal pays right now: the vault less the reserve behind open bets
+      $('lp-value').textContent = p ? `${fmtMon((share / 100) * (r.vault - r.reserved))} MON` : '—';
+      const locked = p && p.lpUnlockAt > Date.now();
+      $('lp-remove').disabled = !(p && shares > 0n) || locked;
+      $('lp-remove').title = locked ? `Locked until ${new Date(p.lpUnlockAt).toLocaleTimeString()}` : '';
+    }
+    paintStreak();
+  }
+
+  // Streak toward the jackpot: one dot per win in a row
+  function paintStreak() {
+    const r = house?.rules;
+    const p = house?.player;
+    const node = $('streak-val');
+    $('pulse-now').textContent = p ? String(p.streak) : '—';
+    if (!r || !p) {
+      node.textContent = '—';
+      return;
+    }
+    const n = r.jackpotStreak;
+    const s = Math.min(p.streak, n);
+    node.innerHTML = `${Array.from({ length: n }, (_, i) => `<i class="${i < s ? 'lit' : ''}"></i>`).join('')}<span>${p.streak}/${n}</span>`;
+    node.title = p.streak
+      ? `${p.streak} win${p.streak === 1 ? '' : 's'} in a row. ${n - s} more pays ≈ ${fmtMon(house.jackpotFor(p.streakMinStake))} MON from the jackpot.`
+      : `Win ${n} one-at-a-time bets in a row to win the jackpot.`;
+  }
+
+  // The connected wallet's bets, from the contract's events
+  function positionsList() {
+    return house?.myBets() || [];
+  }
+
+  // Results shown in the bet rows for a few seconds after they land
+  const RESULT_SHOWN_MS = 5000;
+  const recentResults = new Map(); // betId -> { bet, until }
+
+  /** One bet's row: live status by the chart price, or its result */
+  function betPill(bet, market, price, now) {
+    const up = bet.side === 'UP';
+    const cls = ['bet-pill', up ? 'up' : 'down'];
+    const glyph = up ? '▲' : '▼';
+    const strikePrice = bet.startPrice ?? house.strikeOf(bet);
+    const stake = `#${bet.betId} ${sideName(bet.side)} ${fmtMon(bet.stake)}${strikePrice ? ` @ ${fmtPrice(strikePrice, market.decimals)}` : ''}`;
+    let text;
+    if (bet.status !== 'Pending') {
+      if (bet.status === 'Won') { cls.push('won'); text = `${stake} · won +${fmtMon(bet.paid)}`; }
+      else if (bet.status === 'Lost') { cls.push('lost'); text = `${stake} · lost`; }
+      else { cls.push('back'); text = `${stake} · ${bet.status === 'Push' ? 'tie' : 'no price'} · back`; }
+    } else {
+      const phase = house.phaseOf(bet, now);
+      const strike = house.strikeOf(bet);
+      if (phase === 'settling') {
+        text = now > (bet.endTs + SELF_SETTLE_AFTER_S) * 1000 ? `${stake} · late: settle in My bets` : `${stake} · result coming`;
+      } else if (phase === 'closed' || !strike) {
+        const left = (bet.startTs * 1000 - now) / 1000;
+        text = `${stake} · strike ${left > 0 ? `in ${fmtClock(left)}` : 'setting…'}`;
+      } else {
+        const left = fmtClock((bet.endTs * 1000 - now) / 1000);
+        if (price === null) text = `${stake} · ${left}`;
+        else if (closeCall(price, strike)) text = `${stake} · even · ${left}`;
+        else if (up ? price > strike : price < strike) { cls.push('winning'); text = `${stake} · winning ${fmtMon(bet.payout)} · ${left}`; }
+        else text = `${stake} · behind ${Math.abs(price - strike).toFixed(market.decimals)} · ${left}`;
       }
     }
-
-    const total = m.poolUp + m.poolDown;
-    if (m.roundId === null) {
-      // The round has not been read from the contract yet: show nothing rather than an empty pool
-      el.tugTotal.textContent = '—';
-      el.tugUpLabel.textContent = '—';
-      el.tugDownLabel.textContent = '—';
-      $('up-pool').textContent = '—';
-      $('down-pool').textContent = '—';
-      $('up-players').textContent = '';
-      $('down-players').textContent = '';
-      el.tugUp.style.width = '50%';
-      el.tugDown.style.width = '50%';
-      return;
-    }
-    const upPct = total > 0 ? (m.poolUp / total) * 100 : 50;
-    el.tugUp.style.width = `${upPct}%`;
-    el.tugDown.style.width = `${100 - upPct}%`;
-    el.tugUpLabel.textContent = `▲ ${Math.round(upPct)}%`;
-    el.tugDownLabel.textContent = `${Math.round(100 - upPct)}% ▼`;
-    const upPlayers = m.upBettors || 0;
-    const downPlayers = m.downBettors || 0;
-    el.tugTotal.textContent = `${fmtPool(total)} MON · ${plural(upPlayers + downPlayers, 'player')}`;
-    $('up-pool').textContent = `${fmtPool(m.poolUp)} MON`;
-    $('down-pool').textContent = `${fmtPool(m.poolDown)} MON`;
-    const playersHtml = (n) => `${n.toLocaleString('en-US')}<span class="word"> player${n === 1 ? '' : 's'}</span>`;
-    $('up-players').innerHTML = playersHtml(upPlayers);
-    $('down-players').innerHTML = playersHtml(downPlayers);
-    $('pulse-now').textContent = (upPlayers + downPlayers).toLocaleString('en-US');
-    engine.setPools(m.poolUp, m.poolDown);
-
-    // Stats pane
-    $('stat-pool').textContent = `${fmtMon(total)} MON`;
-    $('stat-split').textContent = `${fmtPool(m.poolUp)} / ${fmtPool(m.poolDown)}`;
-    $('stat-fee').textContent = amm.feeBps === null ? '—' : `${(amm.feeBps / 100).toFixed(2)}%`;
-    if (stake > 0 && odds.multUp && odds.multDown) {
-      const preUp = odds.multUp;
-      const preDn = odds.multDown;
-      const dilUp = Math.max(0, (preUp - postBetMultiplier('UP', stake)) / preUp) * 100;
-      const dilDn = Math.max(0, (preDn - postBetMultiplier('DOWN', stake)) / preDn) * 100;
-      $('stat-impact').textContent = `−${dilUp.toFixed(1)}% ▲ / −${dilDn.toFixed(1)}% ▼`;
-    } else {
-      $('stat-impact').textContent = '—';
-    }
+    return `<div class="${cls.join(' ')}"><span class="position-glyph">${glyph}</span><span>${escapeHtml(text)}</span></div>`;
   }
 
-  // Winning side of the active market's recent rounds with bets (▲ Rise, ▼ Fall, · refunded), newest last
-  function paintRecent() {
-    const id = SUPPORTED_MARKETS[amm.activeMarketKey]?.marketId.toLowerCase();
-    const sides = (chainHistory?.roundsList() || [])
-      .filter((r) => r.marketId === id && r.up + r.down > 0)
-      .sort((a, b) => b.roundId - a.roundId)
-      .map((r) => (r.status === 'settled' ? r.winningSide : null));
-    const node = $('recent-results');
-    const last = sides.slice(0, 8).reverse();
-    node.innerHTML = last.length
-      ? last.map((s) => (s === 'UP' ? '<i class="r-up">▲</i>' : s === 'DOWN' ? '<i class="r-down">▼</i>' : '<i class="r-void">·</i>')).join('')
-      : '—';
-  }
-
-
-  // The connected wallet's positions, from the contract's events
-  function positionsList() {
-    return liveRounds?.positions(web3.account) || [];
-  }
-
-  function activePositionsForMarket() {
-    const m = amm.getActiveMarket();
-    // Positions still in play: the round taking bets and the running round (continuous play)
-    return positionsList().filter((p) => p.marketKey === amm.activeMarketKey && (p.roundId === m.roundId || p.roundId === m.liveRoundId) && p.status === 'Active');
-  }
-
+  const MAX_PILLS = 4;
+  let pillCount = 0;
   function paintPositionChip(market, chartPrice) {
-    const price = chartPrice;
-    const mine = activePositionsForMarket();
-    const wasHidden = el.positionChip.classList.contains('hidden');
-    if (!mine.length) {
-      el.positionChip.classList.add('hidden');
-      if (!wasHidden) updateSafeArea();
-      return;
+    const now = Date.now();
+    const id = activeMarketId()?.toLowerCase();
+    for (const [k, r] of recentResults) if (r.until < now) recentResults.delete(k);
+    const mine = positionsList();
+    const running = mine.filter((b) => b.status === 'Pending' && b.marketId === id).sort((a, b) => a.endTs - b.endTs);
+    const done = [...recentResults.values()].map((r) => r.bet).filter((b) => b.marketId === id);
+    const elsewhere = mine.filter((b) => b.status === 'Pending' && b.marketId !== id).length;
+    const rows = [...done, ...running];
+    const shown = rows.slice(0, MAX_PILLS);
+    let html = shown.map((b) => betPill(b, market, chartPrice, now)).join('');
+    const hidden = rows.length - shown.length;
+    if (hidden > 0 || elsewhere > 0) {
+      const parts = [];
+      if (hidden > 0) parts.push(`+${hidden} more`);
+      if (elsewhere > 0) parts.push(`${elsewhere} on other markets`);
+      html += `<div class="bet-pill more" title="All your bets are in My bets (☰)">${parts.join(' · ')}</div>`;
     }
-    if (wasHidden) requestAnimationFrame(updateSafeArea);
-    const sides = new Set(mine.map((p) => p.side));
-    const stake = mine.reduce((s, p) => s + p.amount, 0);
-    el.positionChip.classList.remove('hidden');
-    el.positionChip.classList.remove('up', 'down', 'winning');
-
-    if (sides.size > 1) {
-      el.positionGlyph.textContent = '◆';
-      el.positionText.textContent = `${fmtMon(stake)} MON on both sides`;
-      return;
+    el.positionChip.innerHTML = html;
+    const count = shown.length + (hidden > 0 || elsewhere > 0 ? 1 : 0);
+    el.positionChip.classList.toggle('hidden', count === 0);
+    if (count !== pillCount) {
+      pillCount = count;
+      requestAnimationFrame(updateSafeArea);
     }
-    const side = mine[0].side;
-    el.positionChip.classList.add(side === 'UP' ? 'up' : 'down');
-    el.positionGlyph.textContent = side === 'UP' ? '▲' : '▼';
-
-    if (!market.lockPrice) {
-      el.positionText.textContent = `${fmtMon(stake)} MON on ${sideName(side)} · strike sets at lock`;
-      return;
-    }
-    if (price === null) {
-      el.positionText.textContent = `${fmtMon(stake)} MON on ${sideName(side)} · waiting for the price feed`;
-      return;
-    }
-    if (closeCall(price, market.lockPrice)) {
-      el.positionText.textContent = `Too close to call · ${fmtMon(stake)} MON at stake`;
-      return;
-    }
-    const winning = side === 'UP' ? price > market.lockPrice : price < market.lockPrice;
-    const mult = parseFloat(side === 'UP' ? amm.getLiveOdds().multUp : amm.getLiveOdds().multDown) || 1;
-    if (winning) {
-      el.positionChip.classList.add('winning');
-      el.positionText.textContent = `Winning · pays ≈ ${fmtMon(stake * mult)} MON`;
-    } else {
-      const behind = Math.abs(price - market.lockPrice);
-      el.positionText.textContent = `Behind by ${behind.toFixed(market.decimals)} · ${fmtMon(stake)} MON at stake`;
-    }
+    // Every running bet's strike on the chart
+    engine.setUserBets(running.map((b) => ({ id: b.betId, side: b.side, stake: b.stake, strike: house.strikeOf(b), startAt: b.startTs * 1000, endAt: b.endTs * 1000 })));
   }
 
   // ---------------------------------------------------------------------------
   // Ledger lists
   // ---------------------------------------------------------------------------
-  function renderPositions() {
-    const positions = positionsList();
-    const active = positions.filter((p) => p.status === 'Active').length;
-    const claimable = positions.filter((p) => (p.status === 'Won' || p.status === 'Refunded') && !p.claimed).length;
-    el.ledgerCount.classList.toggle('hidden', !active && !claimable);
-    el.ledgerCount.classList.toggle('claimable', claimable > 0);
-    el.ledgerCount.textContent = claimable || active;
+  const OUTCOME = {
+    Won: (b) => `<span class="row-amount won num">+${fmtMon(b.paid)}</span><span class="tag">Won</span>`,
+    Lost: (b) => `<span class="row-amount lost num">${fmtMon(b.stake)}</span><span class="tag">Lost</span>`,
+    Push: (b) => `<span class="row-amount num">${fmtMon(b.paid)}</span><span class="tag">Tie · back</span>`,
+    Void: (b) => `<span class="row-amount num">${fmtMon(b.paid)}</span><span class="tag">No price · back</span>`
+  };
 
-    if (!positions.length) {
-      el.positionsList.innerHTML = !web3.account
-        ? '<div class="empty">Connect your wallet to see your positions.</div>'
-        : '<div class="empty">No positions yet.<br>Pick Rise or Fall to join the current round.</div>';
-      return;
+  function betRow(b, { who = false } = {}) {
+    const glyph = b.side === 'UP' ? '▲' : '▼';
+    const market = chainHistory?.marketLabel(b.marketId) || '';
+    const strike = b.startPrice ?? house?.strikeOf(b);
+    const prices = strike ? ` · ${strike.toLocaleString('en-US')}${b.endPrice ? ` → ${b.endPrice.toLocaleString('en-US')}` : ''}` : '';
+    let end;
+    if (b.status === 'Pending') {
+      const phase = house?.phaseOf(b) || 'locked';
+      const late = !who && Date.now() > (b.endTs + SELF_SETTLE_AFTER_S) * 1000;
+      end = late
+        ? `<button class="claim-btn" data-settle="${b.betId}" title="The result is signed but not settled yet. Settle it from your wallet (you pay the network fee).">Settle it yourself</button>`
+        : `<span class="row-amount num">${fmtMon(b.stake)}</span><span class="tag">${phase === 'closed' ? 'Strike soon' : phase === 'locked' ? 'Live' : 'Settling'}</span>`;
+    } else {
+      end = (OUTCOME[b.status] || (() => ''))(b);
     }
-
-    // Live: several claimable rounds in one market are claimed in one transaction (one network fee)
-    const claimables = positions.filter((p) => (p.status === 'Won' || p.status === 'Refunded') && !p.claimed);
-    const byMarket = new Map();
-    for (const p of claimables) byMarket.set(p.marketId, [...(byMarket.get(p.marketId) || []), p]);
-    const claimAll = [...byMarket.entries()].filter(([, list]) => list.length > 1).map(([marketId, list]) =>
-      `<button class="claim-all-btn" data-claim-all="${escapeHtml(marketId)}" data-rounds="${list.map((p) => p.roundId).join(',')}">Claim all ${escapeHtml(list[0].market)} (${list.length} rounds, one fee)</button>`).join('');
-
-    el.positionsList.innerHTML = claimAll + positions.map((p) => {
-      const glyph = p.side === 'UP' ? '▲' : '▼';
-      let end;
-      if ((p.status === 'Won' || p.status === 'Refunded') && !p.claimed) {
-        end = `<button class="claim-btn num" data-claim="${escapeHtml(p.id)}">${p.status === 'Won' ? 'Claim' : 'Refund'} ${p.payout === null ? '' : fmtMon(p.payout)}</button>`;
-      } else if (p.status === 'Won') {
-        end = `<span class="row-amount won num">+${fmtMon(p.payout)}</span><span class="tag">Claimed</span>`;
-      } else if (p.status === 'Refunded') {
-        end = `<span class="row-amount num">${fmtMon(p.payout)}</span><span class="tag">Refunded</span>`;
-      } else if (p.status === 'Lost') {
-        end = `<span class="row-amount lost num">${fmtMon(p.amount)}</span><span class="tag">Lost</span>`;
-      } else {
-        end = `<span class="row-amount num">${fmtMon(p.amount)}</span><span class="tag">Live</span>`;
-      }
-      return `
-        <div class="row">
-          <span class="row-glyph ${p.side === 'UP' ? 'up' : 'down'}">${glyph}</span>
-          <div class="row-main">
-            <span class="row-title">${escapeHtml(p.market)} · ${sideName(p.side)}</span>
-            <span class="row-sub num">Round ${p.roundId} · ${fmtMon(p.amount)} MON${p.entryMult && p.entryMult !== '—' ? ` at ${escapeHtml(p.entryMult)}×` : ''}</span>
-          </div>
-          <div class="row-end">${end}</div>
-        </div>`;
-    }).join('');
+    return `
+      <div class="row">
+        <span class="row-glyph ${b.status === 'Pending' ? (b.side === 'UP' ? 'up' : 'down') : b.status === 'Won' ? 'up' : b.status === 'Lost' ? 'down' : 'neutral'}">${glyph}</span>
+        <div class="row-main">
+          <span class="row-title">${who ? `${escapeHtml(shortAddr(b.user))} · ` : ''}${escapeHtml(market)} · ${sideName(b.side)} ${b.duration}s</span>
+          <span class="row-sub num">#${b.betId} · ${fmtMon(b.stake)} MON${prices}</span>
+        </div>
+        <div class="row-end">${end}</div>
+      </div>`;
   }
 
   el.positionsList.addEventListener('click', async (e) => {
-    const all = e.target.closest('[data-claim-all]');
-    if (all) {
-      all.disabled = true;
-      const rounds = all.dataset.rounds.split(',').map(Number);
-      const res = await web3.claimBatch(all.dataset.claimAll, rounds);
-      if (!res.success) {
-        all.disabled = false;
-        return toast('Claim failed', res.error || 'Rejected in wallet', { error: true });
-      }
-      toast('Payouts sent', `${rounds.length} rounds in one transaction`, { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
-      setTimeout(() => web3.fetchBalance(), 2500);
-      return;
-    }
-    const btn = e.target.closest('[data-claim]');
+    const btn = e.target.closest('[data-settle]');
     if (!btn) return;
-    const pos = positionsList().find((p) => p.id === btn.dataset.claim);
-    if (!pos) return;
-    if (!web3.account) return toast('Wallet not connected', 'Connect your wallet to claim.', { error: true });
+    const bet = positionsList().find((b) => b.betId === Number(btn.dataset.settle));
+    if (!bet || bet.status !== 'Pending') return;
+    const relay = API_CONFIG.priceRelayUrl;
+    if (!relay) return toast('No relay configured', 'Signed prices come from the relay (NEXT_PUBLIC_PRICE_RELAY_URL).', { error: true });
     btn.disabled = true;
-    const res = await web3.claimPayout(pos.marketId, pos.roundId);
-    if (!res.success) {
+    btn.textContent = 'Getting signed prices…';
+    try {
+      const market = Object.values(SUPPORTED_MARKETS).find((m) => m.marketId.toLowerCase() === bet.marketId);
+      const updates = [];
+      for (const ts of [bet.startTs, bet.endTs]) {
+        if (chainHistory.price(bet.marketId, ts) !== null) continue;
+        const r = await fetch(`${relay}/reports?feed=${encodeURIComponent(market.feed)}&ts=${ts}`);
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.error || `relay ${r.status}`);
+        updates.push({ marketId: market.marketId, ts, reports: body });
+      }
+      btn.textContent = 'Confirm in wallet…';
+      const res = await web3.settleBets(updates, [bet.betId]);
+      if (!res.success) throw new Error(res.cancelled ? 'Cancelled in your wallet.' : res.error);
+      toast('Settling your bet', 'The result lands in a few seconds.', { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
+    } catch (err) {
+      toast('Could not settle yet', err.message, { error: true });
       btn.disabled = false;
-      toast('Claim failed', res.error || 'Rejected in wallet', { error: true });
-      return;
+      btn.textContent = 'Settle it yourself';
     }
-    toast('Payout sent', 'It appears in your ledger once the transaction is in a block.', { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
-    setTimeout(() => web3.fetchBalance(), 2500);
   });
 
-  // Rounds with bets that ended on-chain, newest first
-  function renderHistory() {
-    const rounds = (chainHistory?.roundsList() || []).filter((r) => r.up + r.down > 0).slice(0, 60);
-    if (!rounds.length) {
-      el.historyList.innerHTML = '<div class="empty">No rounds with bets have ended on-chain yet.</div>';
+  function renderPositions() {
+    const bets = positionsList();
+    const live = bets.filter((b) => b.status === 'Pending').length;
+    el.ledgerCount.classList.toggle('hidden', !live);
+    el.ledgerCount.textContent = live;
+    if (!bets.length) {
+      el.positionsList.innerHTML = !web3.account
+        ? '<div class="empty">Connect your wallet to see your bets.</div>'
+        : '<div class="empty">No bets yet.<br>Pick Rise or Fall: the house takes the other side.</div>';
       return;
     }
-    el.historyList.innerHTML = rounds.map((r) => {
-      const winner = r.status === 'settled' ? r.winningSide : null;
-      const cls = winner === 'UP' ? 'up' : winner === 'DOWN' ? 'down' : 'neutral';
-      const glyph = winner === 'UP' ? '▲' : winner === 'DOWN' ? '▼' : '◆';
-      const outcome = winner === 'UP' ? 'Rise won' : winner === 'DOWN' ? 'Fall won' : 'Refunded';
-      const prices = r.lockPrice && r.closePrice ? ` · ${r.lockPrice.toLocaleString('en-US')} → ${r.closePrice.toLocaleString('en-US')}` : '';
-      return `
-        <div class="row">
-          <span class="row-glyph ${cls}">${glyph}</span>
-          <div class="row-main">
-            <span class="row-title">${escapeHtml(chainHistory.marketLabel(r.marketId))} · ${outcome}</span>
-            <span class="row-sub num">Round ${r.roundId}${prices}</span>
-          </div>
-          <div class="row-end"><span class="row-amount num">${fmtMon(r.up + r.down)}</span></div>
-        </div>`;
-    }).join('');
+    el.positionsList.innerHTML = bets.slice(0, 80).map((b) => betRow(b)).join('');
+  }
+
+  // Everyone's latest results, newest first
+  function renderHistory() {
+    const bets = (chainHistory?.betsList() || []).filter((b) => b.status !== 'Pending').slice(0, 60);
+    el.historyList.innerHTML = bets.length
+      ? bets.map((b) => betRow(b, { who: true })).join('')
+      : '<div class="empty">No bets have settled yet.</div>';
   }
 
   function renderSessionStats() {
-    const settled = positionsList().filter((p) => p.status === 'Won' || p.status === 'Lost');
+    const settled = positionsList().filter((b) => b.status === 'Won' || b.status === 'Lost');
     $('stat-settled').textContent = settled.length;
+    const p = house?.player;
+    $('stat-streak').textContent = p ? `${p.streak} win${p.streak === 1 ? '' : 's'}` : '—';
     if (!settled.length) {
       $('stat-winrate').textContent = '—';
       $('stat-net').textContent = '—';
-      $('stat-streak').textContent = '—';
       return;
     }
-    const wins = settled.filter((p) => p.status === 'Won').length;
-    const net = settled.reduce((acc, p) => acc + ((p.status === 'Won' ? p.payout || 0 : 0) - p.amount), 0);
-    let streak = 0;
-    for (const p of settled) {
-      if (p.status === 'Won') streak++;
-      else break;
-    }
+    const wins = settled.filter((b) => b.status === 'Won').length;
+    const net = settled.reduce((acc, b) => acc + (b.paid || 0) - b.stake, 0);
     $('stat-winrate').textContent = `${((wins / settled.length) * 100).toFixed(0)}%`;
     $('stat-net').textContent = `${net >= 0 ? '+' : '−'}${fmtMon(Math.abs(net))} MON`;
-    $('stat-streak').textContent = streak ? `${streak} win${streak === 1 ? '' : 's'}` : '—';
   }
 
   function renderLedger() {
@@ -867,49 +896,85 @@ export function startApp() {
   }
 
   // ---------------------------------------------------------------------------
-  // Settlement moment
+  // Result moment: the wallet's bet settled on-chain
   // ---------------------------------------------------------------------------
   let resultTimer = null;
-  function showResult({ marketKey, roundId, winner, lockPrice, closePrice, confirming = false }) {
-    const m = amm.markets[marketKey];
-    const mine = positionsList().filter((p) => p.marketKey === marketKey && p.roundId === roundId);
-    const kind = winner === 'UP' ? 'up' : winner === 'DOWN' ? 'down' : 'neutral';
+  let pendingResults = [];
+  let resultBatchTimer = null;
+  // Results that land together (one settlement transaction, or bets ending at the same moment) are
+  // announced once, as a summary, instead of each replacing the last
+  function flushResults() {
+    const list = pendingResults;
+    pendingResults = [];
+    if (list.length === 1) return showResult(list[0]);
+    if (list.length) showResults(list);
+  }
 
-    el.resultTitle.textContent = winner === 'UP' ? 'Rise wins' : winner === 'DOWN' ? 'Fall wins' : winner === 'DRAW' ? 'Tie' : winner === 'REFUND' ? 'Round refunded' : 'One-sided round';
-    if (mine.length) {
-      // Outcome from the round's result and the position's side (the ledger may not have caught up yet)
-      const outcome = (p) => (winner === 'UP' || winner === 'DOWN' ? (p.side === winner ? 'Won' : 'Lost') : 'Refunded');
-      const won = mine.filter((p) => outcome(p) === 'Won').reduce((s, p) => s + (p.status === 'Won' && p.payout ? p.payout : 0), 0);
-      const lost = mine.filter((p) => outcome(p) === 'Lost').reduce((s, p) => s + p.amount, 0);
-      const refunded = mine.filter((p) => outcome(p) === 'Refunded').reduce((s, p) => s + p.amount, 0);
-      const wonAny = mine.some((p) => outcome(p) === 'Won');
-      if (won > 0) {
-        el.resultSub.innerHTML = 'You won <span class="num" id="result-won">0.00</span> MON · claim it in the Ledger';
-        countTo($('result-won'), won, 2, 1100);
-      }
-      else if (wonAny) el.resultSub.textContent = 'You won · claim it in the Ledger';
-      else if (refunded > 0) el.resultSub.textContent = `${fmtMon(refunded)} MON refundable in the Ledger`;
-      else el.resultSub.textContent = `You lost ${fmtMon(lost)} MON`;
-    } else if (winner === 'UP' || winner === 'DOWN') {
-      el.resultSub.textContent = `Closed ${fmtPrice(closePrice, m.decimals)} vs strike ${fmtPrice(lockPrice, m.decimals)}`;
+  function showResults(list) {
+    const won = list.filter((b) => b.status === 'Won');
+    const lost = list.filter((b) => b.status === 'Lost');
+    const back = list.filter((b) => b.status === 'Push' || b.status === 'Void');
+    const paid = list.reduce((s, b) => s + (b.paid || 0), 0);
+    const staked = list.reduce((s, b) => s + b.stake, 0);
+    const net = paid - staked;
+    const parts = [];
+    if (won.length) parts.push(`${won.length} won`);
+    if (lost.length) parts.push(`${lost.length} lost`);
+    if (back.length) parts.push(`${back.length} back`);
+    el.resultTitle.textContent = parts.join(' · ');
+    el.resultSub.textContent = `${net >= 0 ? '+' : '−'}${fmtMon(Math.abs(net))} MON net on ${list.length} bets · ${fmtMon(paid)} MON to your balance`;
+    el.resultState.textContent = 'Settled on-chain';
+    el.resultState.className = 'result-state';
+    el.result.className = `result ${won.length > lost.length ? 'up' : 'neutral'}`;
+    void el.result.offsetWidth;
+    el.result.classList.remove('hidden');
+    clearTimeout(resultTimer);
+    resultTimer = setTimeout(() => el.result.classList.add('hidden'), 3600);
+    if (won.length) engine.celebrate(won[0].side, Math.min(2, 0.8 + won.length * 0.3));
+  }
+
+  function showResult(bet) {
+    const m = amm.markets[Object.keys(SUPPORTED_MARKETS).find((k) => SUPPORTED_MARKETS[k].marketId.toLowerCase() === bet.marketId)] || amm.getActiveMarket();
+    const won = bet.status === 'Won';
+    const back = bet.status === 'Push' || bet.status === 'Void';
+    const kind = won ? (bet.side === 'UP' ? 'up' : 'down') : 'neutral';
+    el.resultTitle.textContent = won ? 'You won' : back ? (bet.status === 'Push' ? 'Tie · stake back' : 'No price · stake back') : 'Not this time';
+    if (won) {
+      const streak = bet.streakAfter || 0;
+      el.resultSub.innerHTML = `+<span class="num" id="result-won">0.00</span> MON to your balance${streak > 1 ? ` · ${streak} in a row` : ''}`;
+      countTo($('result-won'), bet.paid, 2, 1100);
+    } else if (back) {
+      el.resultSub.textContent = `${fmtMon(bet.paid)} MON back in your balance`;
     } else {
-      el.resultSub.textContent = 'All stakes refunded';
+      el.resultSub.textContent = bet.startPrice && bet.endPrice
+        ? `${sideName(bet.side)} · ${fmtPrice(bet.startPrice, m.decimals)} → ${fmtPrice(bet.endPrice, m.decimals)}`
+        : `${sideName(bet.side)} lost ${fmtMon(bet.stake)} MON`;
     }
-
-    // Read from RedStone's signed close report and verified here; the settle transaction follows
-    el.resultState.textContent = confirming ? 'Official price, signed by RedStone · confirming on-chain…' : 'Settled on-chain';
-    el.resultState.className = `result-state${confirming ? ' pending' : ''}`;
-
-    // Restart the CSS animation
+    el.resultState.textContent = 'Settled on-chain';
+    el.resultState.className = 'result-state';
     el.result.className = `result ${kind}`;
     void el.result.offsetWidth;
     el.result.classList.remove('hidden');
     clearTimeout(resultTimer);
-    // An early result stays up until the chain confirms it (at most 20 s)
-    resultTimer = setTimeout(() => el.result.classList.add('hidden'), confirming ? 20000 : 3200);
-    engine.flashSettlement(winner);
-    const youWon = mine.some((p) => (winner === 'UP' || winner === 'DOWN') && p.side === winner);
-    engine.celebrate(winner, youWon ? 1.4 : (winner === 'UP' || winner === 'DOWN') ? 0.6 : 0.3);
+    resultTimer = setTimeout(() => el.result.classList.add('hidden'), 3200);
+    if (bet.marketId === activeMarketId()?.toLowerCase()) {
+      engine.flashSettlement(bet.endPrice > bet.startPrice ? 'UP' : bet.endPrice < bet.startPrice ? 'DOWN' : 'DRAW');
+      engine.celebrate(won ? bet.side : 'DRAW', won ? 1.4 : 0.3);
+    }
+  }
+
+  function showJackpot(rec) {
+    el.resultTitle.textContent = 'JACKPOT';
+    el.resultSub.innerHTML = `+<span class="num" id="result-won">0.00</span> MON · ${rec.streak} wins in a row`;
+    countTo($('result-won'), rec.amount, 2, 1800);
+    el.resultState.textContent = 'Paid from the streak jackpot';
+    el.resultState.className = 'result-state';
+    el.result.className = 'result up jackpot';
+    void el.result.offsetWidth;
+    el.result.classList.remove('hidden');
+    clearTimeout(resultTimer);
+    resultTimer = setTimeout(() => el.result.classList.add('hidden'), 5000);
+    engine.celebrate('UP', 2);
   }
 
   // ---------------------------------------------------------------------------
@@ -954,30 +1019,30 @@ export function startApp() {
       });
       el.assetName.textContent = SUPPORTED_MARKETS[key]?.name || key;
       el.assetPair.textContent = market.symbol.replace('/', ' / ');
-      el.roundId.textContent = '—';
-      // Round fields belong to the previous market until the contract read for this one arrives
-      Object.assign(market, { roundId: null, poolUp: 0, poolDown: 0, upBettors: 0, downBettors: 0, lockPrice: null });
-      amm.feeBps = null;
       engine.reset(market.price, market.decimals);
       engine.store.load(SUPPORTED_MARKETS[key]);
       engine.setStrike(null);
-      engine.setUserPositions([]);
+      engine.setUserBets([]);
       lastHeroPrice = null;
       paintReadout(market, market.price);
       paintOdds();
       paintPositionChip(market, market.price);
-      paintRecent();
-      liveRounds?.start(key);
+      tickHouse();
     }
   });
 
   // ---------------------------------------------------------------------------
   // Trading
   // ---------------------------------------------------------------------------
-  async function executeTrade(side) {
-    const amount = parseFloat(el.stake.value) || 0;
-    const m = amm.getActiveMarket();
-    if (amount <= 0) return toast('Enter a stake', 'Choose how much MON to put on this round.', { error: true });
+  /**
+   * One tap, one transaction: the stake comes from the in-game balance first, the rest from the
+   * wallet. The payout is the contract's quote; the bet is refused if other bets moved it more than 2%.
+   */
+  async function executeTrade(side, stakeOverride = null) {
+    if (betPending) return;
+    const amount = stakeOverride ?? (parseFloat(el.stake.value) || 0);
+    const r = house?.rules;
+    if (amount <= 0) return toast('Enter a stake', 'Choose how much MON to bet.', { error: true });
     if (!web3.account) {
       openWalletPicker();
       return;
@@ -987,26 +1052,39 @@ export function startApp() {
       openModal('wallet-modal');
       return;
     }
-    const balance = currentBalance();
-    if (balance !== null && amount > balance) return toast('Stake above balance', `You have ${fmtMon(balance)} MON available.`, { error: true });
-    if (minBetMon !== null && amount < minBetMon) return toast('Stake below the minimum', `The contract's minimum bet is ${minBetMon} MON.`, { error: true });
-    {
-      const st = liveRounds?.state;
-      if (!st || st.error) return toast('Round not loaded', st?.error || 'Reading the round from Monad…', { error: true });
-      if (st.phase !== 'open' && st.phase !== 'next') return toast('Bets are closed', 'Wait a moment for the next round.', { error: true });
-      // Slippage guard: revert if, by inclusion, the payout per MON fell more than 5% below what the
-      // screen shows after this stake. Only meaningful once the other side has money in it.
-      const opposing = side === 'UP' ? st.poolDown : st.poolUp;
-      const minMultWad = opposing > 0 && st.phase === 'open'
-        ? BigInt(Math.floor(postBetMultiplier(side, amount) * 0.95 * 1e6)) * 10n ** 12n
-        : 0n;
-      const txRes = await web3.sendTradeTransaction(side, st.marketId, st.roundId, amount, minMultWad);
-      if (!txRes.success) return toast('Bet not sent', txRes.error || 'Rejected in wallet', { error: true });
-      const btn = side === 'UP' ? el.betUp : el.betDown;
-      const r = btn.getBoundingClientRect();
-      engine.emitBet(side, r.left + r.width / 2, r.top + r.height / 3, amount);
-      setTimeout(() => { liveRounds?.sync(); web3.fetchBalance(); }, 2000);
+    if (!r) return toast('House not loaded', house?.error || 'Reading the house contract on Monad…', { error: true });
+    if (r.paused) return toast('Betting paused', 'The house has paused new bets. Your balance can still be cashed out.', { error: true });
+    if (amount < r.minBet) return toast('Stake below the minimum', `The minimum bet is ${fmtMon(r.minBet)} MON.`, { error: true });
+    if (amount > r.maxStake) return toast('Above the house limit', `The house takes bets up to ${fmtMon(r.maxStake)} MON right now.`, { error: true });
+    const params = betParams(side, amount);
+    const q = quotes[side];
+    if (!q || q.stake !== amount || params.minPayoutWei === null) return toast('Reading the odds', 'One moment: the contract is pricing this bet.', { error: true });
+    if (q.refused) return toast('Not accepted', REFUSED[q.refused] || q.refused, { error: true });
+    const wallet = currentBalance();
+    if (wallet !== null && Number(ethers.formatEther(params.walletWei)) > wallet) {
+      return toast('Stake above balance', `You have ${fmtMon(wallet)} MON in your wallet and ${fmtMon(inGame())} MON in play.`, { error: true });
     }
+    // Waiting for the wallet: say so on the button and block a second bet until it answers
+    betPending = side;
+    paintOdds();
+    tickHouse();
+    let txRes;
+    try {
+      txRes = await web3.placeBet(params);
+    } finally {
+      betPending = null;
+      paintOdds();
+      tickHouse();
+    }
+    if (!txRes.success) {
+      if (txRes.cancelled) return toast('Bet cancelled', 'Nothing was sent.');
+      return toast('Bet not sent', txRes.error || 'Rejected in wallet', { error: true });
+    }
+    const btn = side === 'UP' ? el.betUp : el.betDown;
+    const rect = btn.getBoundingClientRect();
+    engine.emitBet(side, rect.left + rect.width / 2, rect.top + rect.height / 3, amount);
+    if (params.balanceWei > 0n) house.spent(params.balanceWei);
+    setTimeout(() => web3.fetchBalance(), 2000);
   }
 
   el.betUp.addEventListener('click', () => executeTrade('UP'));
@@ -1022,10 +1100,73 @@ export function startApp() {
   });
   $('stake-max').addEventListener('click', () => {
     const balance = currentBalance();
-    if (balance === null) return toast('Connect a wallet', 'Max uses your wallet balance.', { error: true });
-    // Leave room for the network fee
-    el.stake.value = Math.max(0, Math.floor((balance - 0.05) * 100) / 100);
+    if (balance === null) return toast('Connect a wallet', 'Max uses your wallet and in-game balance.', { error: true });
+    // Leave room for the network fee; never above the house limit
+    const limit = house?.rules?.maxStake ?? Infinity;
+    el.stake.value = Math.max(0, Math.floor(Math.min(limit, balance - 0.05 + inGame()) * 100) / 100);
+    stakeEdited = true;
     paintOdds();
+  });
+
+  // Use all: put the whole in-game balance (up to the max bet) in the stake; the player then picks Rise
+  // or Fall. A bet takes the in-game balance first, so nothing is sent from the wallet for it.
+  el.rideBtn.addEventListener('click', () => {
+    const limit = house?.rules?.maxStake ?? Infinity;
+    const balWei = house?.player?.balanceWei ?? 0n;
+    if (balWei <= 0n) return;
+    // Exact on-chain balance, cut to 6 decimals (what toWei sends) so no dust is left behind
+    const exact = Number(ethers.formatEther(balWei - (balWei % 10n ** 12n)));
+    const stake = Math.min(exact, Math.floor(limit * 1e6) / 1e6);
+    el.stake.value = String(stake);
+    stakeEdited = true;
+    paintOdds();
+    el.stake.classList.remove('flash');
+    void el.stake.offsetWidth;
+    el.stake.classList.add('flash');
+    if (inGame() > limit) toast('Capped at the max bet', `The house takes bets up to ${fmtMon(limit)} MON right now; the rest stays in play.`);
+  });
+
+  el.cashoutBtn.addEventListener('click', async () => {
+    const wei = house?.player?.balanceWei ?? 0n;
+    if (cashingOut || wei <= 0n) return;
+    cashingOut = true;
+    paintOdds();
+    let res;
+    try {
+      res = await web3.withdrawBalance(0n);
+    } finally {
+      cashingOut = false;
+    }
+    if (!res.success) {
+      paintOdds();
+      if (res.cancelled) return toast('Cash out cancelled', 'Your balance stays in play.');
+      if (/Nothing to withdraw/.test(res.error)) {
+        house.readPlayer();
+        return toast('Already cashed out', 'Your in-game balance is empty; the MON is in your wallet.');
+      }
+      return toast('Cash out failed', res.error, { error: true });
+    }
+    house.spent(wei);
+    toast('Cashed out', `${fmtMon(Number(ethers.formatEther(wei)))} MON on its way to your wallet`, { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
+    setTimeout(() => web3.fetchBalance(), 2000);
+  });
+
+  // Be the house: vault deposits and withdrawals
+  $('lp-add').addEventListener('click', async () => {
+    const amount = parseFloat($('lp-amount').value) || 0;
+    if (!web3.account) return openWalletPicker();
+    if (amount <= 0) return toast('Enter an amount', 'How much MON to add to the vault.', { error: true });
+    const res = await web3.addLiquidity(toWei(amount));
+    if (!res.success) return toast(res.cancelled ? 'Deposit cancelled' : 'Deposit failed', res.cancelled ? 'Nothing was sent.' : res.error, { error: !res.cancelled });
+    toast('Added to the vault', `${fmtMon(amount)} MON`, { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
+    $('lp-amount').value = '';
+  });
+  $('lp-remove').addEventListener('click', async () => {
+    const shares = house?.player?.shares ?? 0n;
+    if (shares <= 0n) return;
+    const res = await web3.removeLiquidity(shares);
+    if (!res.success) return toast(res.cancelled ? 'Withdrawal cancelled' : 'Withdrawal failed', res.cancelled ? 'Your share stays in the vault.' : res.error, { error: !res.cancelled });
+    toast('Withdrawn from the vault', 'Your share is on its way to your wallet', { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
   });
   $('stake-clear').addEventListener('click', () => {
     el.stake.value = 0;
@@ -1086,40 +1227,40 @@ export function startApp() {
   let tickerIndex = 0;
 
   function feedLabel(item) {
-    if (item.you) return `You · ${item.market}`;
-    if (item.user) return `${item.user} · ${item.market}`;
-    return `${plural(item.winners || 0, 'winner')} · ${item.market}`;
+    const who = item.you ? 'You' : item.user;
+    return item.jackpot ? `${who} · ${item.streak} in a row` : `${who} · ${item.market}`;
   }
 
-  function renderPulse({ ready, paid, rounds, topMult, feed }) {
+  function renderPulse({ ready, jackpot, jackpotStreak, paid, settled, feed }) {
     const big = $('pulse-paid');
-    if (!ready || paid === null) {
+    if (!ready || jackpot === null) {
       big.textContent = '—';
       return;
     }
     const prev = parseFloat(big.dataset.value || '0');
-    if (paid !== prev || big.textContent === '—') {
-      countTo(big, paid, paid >= 10000 ? 0 : 2, 1400);
-      if (paid > prev) {
+    if (jackpot !== prev || big.textContent === '—') {
+      countTo(big, jackpot, jackpot >= 10000 ? 0 : 2, 1400);
+      if (jackpot > prev) {
         big.classList.remove('bump');
         void big.offsetWidth;
         big.classList.add('bump');
       }
     }
-    $('pulse-rounds').textContent = rounds.toLocaleString('en-US');
-    $('pulse-top').textContent = topMult > 0 ? `${topMult.toFixed(2)}×` : '—';
+    $('pulse-big-label').textContent = `MON jackpot · win ${jackpotStreak} in a row`;
+    $('pulse-rounds').textContent = settled.toLocaleString('en-US');
+    $('pulse-top').textContent = paid === null ? '—' : fmtMon(paid);
 
     const list = $('pulse-feed');
     if (!feed.length) {
-      list.innerHTML = '<li class="empty-feed">No wins claimed yet.</li>';
+      list.innerHTML = '<li class="empty-feed">No wins yet. Be the first.</li>';
     } else {
       list.innerHTML = feed.slice(0, 4).map((item) => {
         const isNew = !seenFeedKeys.has(item.key);
         seenFeedKeys.add(item.key);
         const side = item.side === 'UP' ? 'up' : item.side === 'DOWN' ? 'down' : '';
         return `
-          <li class="feed-item ${side}${item.you ? ' you' : ''}${isNew ? ' new' : ''}">
-            <span class="feed-glyph">${item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span>
+          <li class="feed-item ${side}${item.you ? ' you' : ''}${item.jackpot ? ' jackpot' : ''}${isNew ? ' new' : ''}">
+            <span class="feed-glyph">${item.jackpot ? '★' : item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span>
             <span class="feed-text">${escapeHtml(feedLabel(item))}</span>
             <span class="feed-amt num">+${fmtMon(item.amount)}${item.mult ? `<small>${item.mult.toFixed(2)}×</small>` : ''}</span>
           </li>`;
@@ -1150,7 +1291,9 @@ export function startApp() {
     tickerShown = item.key;
     const side = item.side === 'UP' ? 'up' : item.side === 'DOWN' ? 'down' : '';
     const who = item.you ? 'You' : item.user;
-    ticker.innerHTML = `<span class="${side}">${item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span> ${escapeHtml(who)} won ${fmtMon(item.amount)} MON on ${escapeHtml(item.market)}`;
+    ticker.innerHTML = item.jackpot
+      ? `<span class="up">★</span> ${escapeHtml(who)} hit the jackpot: ${fmtMon(item.amount)} MON`
+      : `<span class="${side}">${item.side === 'UP' ? '▲' : item.side === 'DOWN' ? '▼' : '◆'}</span> ${escapeHtml(who)} won ${fmtMon(item.amount)} MON on ${escapeHtml(item.market)}`;
     ticker.style.animation = 'none';
     void ticker.offsetWidth;
     ticker.style.animation = '';
@@ -1164,125 +1307,126 @@ export function startApp() {
 
   const history = new ChainHistory(web3);
   chainHistory = history;
-  history.onChange(() => {
-    paintRecent();
-    renderLedgerIfChanged();
-  });
+  history.onChange(() => renderLedgerIfChanged());
 
   // ---------------------------------------------------------------------------
-  // Live mode: everything below is read from the contract
+  // Live: everything below is read from the contract
   // ---------------------------------------------------------------------------
   let ledgerSignature = '';
   function renderLedgerIfChanged() {
-    const sig = JSON.stringify(positionsList().map((p) => [p.id, p.status, p.claimed, p.amount, p.payout]))
-      + (chainHistory?.roundsList().length || 0);
+    const late = (b) => b.status === 'Pending' && Date.now() > (b.endTs + SELF_SETTLE_AFTER_S) * 1000;
+    const sig = JSON.stringify(positionsList().map((b) => [b.betId, b.status, house?.phaseOf(b), late(b)]))
+      + (chainHistory?.bets.size || 0) + (house?.player?.streak ?? '');
     if (sig === ledgerSignature) return;
     ledgerSignature = sig;
     renderLedger();
   }
 
-  const BET_CUTOFF_GUARD_S = 8;
-  const LIVE_PHASES = {
-    open: { label: 'Betting open', verb: 'closes in', bets: true },
-    next: { label: 'Next round', verb: '', bets: true },
-    idle: { label: 'Ready', verb: '', bets: true },
-    closed: { label: 'Bets closed', verb: 'strike in', bets: false },
-    locked: { label: 'Strike locked', verb: 'settles in', bets: false },
-    settling: { label: 'Settling', verb: 'waiting for the keeper', bets: false },
-    confirming: { label: 'Confirming price', verb: 'final in', bets: false },
-    expired: { label: 'Refundable', verb: 'unresolved in time, stakes refundable', bets: false },
-    ended: { label: 'Round ended', verb: '', bets: false }
-  };
-
-  function applyLive(st) {
-    if (!st) return;
+  /**
+   * Clock-driven view of the house (no network): the countdown to the next strike, or to the result of
+   * the wallet's running bet, and the chart gates for it.
+   */
+  function tickHouse() {
     const m = amm.getActiveMarket();
-    if (st.error && st.roundId === undefined) {
-      el.phaseLabel.textContent = 'Contract unreachable';
-      el.phaseTime.textContent = st.error;
-      el.betUp.disabled = true;
-      el.betDown.disabled = true;
+    const r = house?.rules;
+    if (!r) {
+      el.phaseLabel.textContent = house?.error ? 'House unreachable' : 'Opening the house';
+      el.phaseTime.textContent = house?.error || '';
+      el.betUp.disabled = Boolean(house?.error);
+      el.betDown.disabled = Boolean(house?.error);
       return;
     }
-    if (st.marketKey !== amm.activeMarketKey) return;
-    bootStep('network');
-    bootStep('round');
-    // The round a bet goes into (current, or the next one a bet opens) and the running round
-    const roundChanged = m.roundId !== st.roundId || m.liveRoundId !== (st.live?.roundId ?? null);
-    m.roundId = st.roundId;
-    m.liveRoundId = st.live?.roundId ?? null;
-    m.poolUp = st.poolUp;
-    m.poolDown = st.poolDown;
-    m.upBettors = st.upBettors ?? 0;
-    m.downBettors = st.downBettors ?? 0;
-    m.lockPrice = st.lockPrice;
-    if (st.feeBps) amm.feeBps = st.feeBps;
-    el.roundId.textContent = st.phase === 'next' ? `${st.roundId} (next)` : st.roundId;
-
-    const ph = LIVE_PHASES[st.phase] || LIVE_PHASES.ended;
     const now = Date.now();
-    const left = st.phase === 'open' ? Math.max(0, (st.betCloseAt - now) / 1000) : null;
-    el.console.classList.toggle('locked', !ph.bets);
-    el.console.classList.toggle('closing', st.phase === 'open' && left <= 5);
-    // No bets in the last few seconds: confirming in a wallet takes time, and a bet that lands after
-    // the cutoff reverts and still pays the network fee. The next round opens right after.
-    const canBet = ph.bets && !(st.phase === 'open' && left !== null && left <= BET_CUTOFF_GUARD_S);
-    el.betUp.disabled = !canBet;
-    el.betDown.disabled = !canBet;
-    el.phaseLabel.textContent = st.phase === 'open' && left <= 5 ? 'Closing' : ph.label;
-    const preview = st.phase === 'next' ? projectedRound(m.roundDuration, now) : null;
-    el.phaseTime.innerHTML = st.phase === 'next'
-      ? (preview
-        ? `<span class="phase-verb">bet now · strike </span>${fmtClock((preview.lockAt - now) / 1000)}<span class="phase-verb"> · result </span>${fmtClock((preview.closeAt - now) / 1000)}`
-        : '<span class="phase-verb">your bet opens the next round</span>')
-      : `<span class="phase-verb">${ph.verb} </span>${left === null ? '' : fmtClock(left)}`;
-    const span = st.phase === 'open' ? Math.max(1, (st.betCloseAt - st.startAt) / 1000) : 1;
-    el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - (left === null ? 0 : Math.min(1, left / span)))}`;
-
-    // Chart: the running round (its strike line and result countdown); else the round taking bets;
-    // else the round a bet would start
-    if (st.live) engine.setLiveRound({ ...st.live, duration: m.roundDuration });
-    else if (st.phase === 'open') engine.setLiveRound({ ...st, duration: m.roundDuration });
-    else if (preview) engine.setLiveRound({ ...preview, phase: 'preview', duration: m.roundDuration });
-    if ((st.lockPrice || null) !== engine.strike) engine.setStrike(st.lockPrice);
-    if (roundChanged) engine.setUserPositions([]);
+    const bet = liveBet();
+    el.betUp.disabled = r.paused || Boolean(betPending);
+    el.betDown.disabled = r.paused || Boolean(betPending);
+    el.console.classList.toggle('locked', r.paused);
+    let span;
+    let left;
+    if (bet) {
+      const phase = house.phaseOf(bet, now);
+      const strike = house.strikeOf(bet);
+      if (phase === 'closed') {
+        left = (bet.startTs * 1000 - now) / 1000;
+        span = Math.max(1, (bet.startTs * 1000 - bet.placedAt) / 1000);
+        el.phaseLabel.textContent = 'Strike in';
+      } else if (phase === 'locked') {
+        left = (bet.endTs * 1000 - now) / 1000;
+        span = bet.duration;
+        el.phaseLabel.textContent = `${sideName(bet.side)} · result in`;
+      } else {
+        left = null;
+        el.phaseLabel.textContent = 'Result coming';
+      }
+      el.phaseTime.innerHTML = left === null ? '<span class="phase-verb">signed price, then paid</span>' : fmtClock(left);
+      engine.setLiveRound({ lockAt: bet.startTs * 1000, closeAt: bet.endTs * 1000, phase: phase === 'settling' ? 'settling' : phase, duration: bet.duration });
+      if ((strike || null) !== engine.strike) engine.setStrike(strike);
+    } else {
+      const strikeAt = house.nextStrikeAt(now);
+      left = (strikeAt - now) / 1000;
+      span = 10;
+      el.phaseLabel.textContent = 'Bet now';
+      // The result time is part of the label, which narrow screens hide: they show the strike countdown only
+      el.phaseTime.innerHTML = `<span class="phase-verb">strike </span>${fmtClock(left)}<span class="phase-verb"> · result ${fmtClock(left + duration)}</span>`;
+      engine.setLiveRound({ lockAt: strikeAt, closeAt: strikeAt + duration * 1000, phase: 'preview', duration });
+      if (engine.strike !== null) engine.setStrike(null);
+    }
+    el.ringFill.style.strokeDashoffset = `${RING_LENGTH * (1 - (left === null ? 0 : Math.min(1, Math.max(0, left) / span)))}`;
+    el.console.classList.toggle('closing', Boolean(bet) && left !== null && left <= 5);
+    refreshQuotes();
     paintReadout(m, m.price);
-    paintOdds();
     paintPositionChip(m, m.price);
     renderLedgerIfChanged();
   }
 
-
-  // The countdown and phase move with the local clock between contract events (no network requests)
-  setInterval(() => {
-    liveRounds?.tick();
-    if (liveRounds?.state) applyLive(liveRounds.state);
-  }, 500);
+  // The countdown moves with the local clock between contract events (no network requests)
+  setInterval(tickHouse, 250);
 
   history.onGas((wei) => {
     gasPriceWei = wei;
-    if (liveRounds?.state) applyLive(liveRounds.state);
+    paintOdds();
   });
 
-  liveRounds = new LiveRounds({
+  house = new HouseState({
     web3,
     history,
-    onUpdate: applyLive,
-    onRoundConfirmed: ({ matches, ...data }) => {
-      if (!matches) {
-        // Never expected (same signed data), but the chain decides: show its result
-        showResult(data);
-        el.resultState.textContent = 'Settled on-chain (differs from the early reading)';
-        return;
+    onUpdate: (h) => {
+      if (h.rules) {
+        bootStep('network');
+        bootStep('round');
+        seedStake();
+        $('guide-fee').textContent = `${h.payoutAt(0.5 - h.rules.band).toFixed(2)}×`;
+      } else if (h.error) {
+        bootStep('network');
       }
-      el.resultState.textContent = 'Settled on-chain ✓';
-      el.resultState.className = 'result-state';
-      clearTimeout(resultTimer);
-      resultTimer = setTimeout(() => el.result.classList.add('hidden'), 2500);
+      paintOdds();
+      tickHouse();
+      renderLedger();
     },
-    onRoundEnd: (data) => {
-      showResult(data);
-      paintRecent();
+    onStrike: () => tickHouse(),
+    onResult: (bet) => {
+      recentResults.set(bet.betId, { bet, until: Date.now() + RESULT_SHOWN_MS });
+      pendingResults.push(bet);
+      clearTimeout(resultBatchTimer);
+      resultBatchTimer = setTimeout(flushResults, 700);
+      renderLedger();
+    }
+  });
+  const shownJackpots = new Set();
+  history.onBets((batch) => {
+    if (batch.initial) return;
+    const active = activeMarketId()?.toLowerCase();
+    if (batch.placed.some((b) => b.marketId === active)) {
+      windowVersion++;
+      refreshQuotes();
+    }
+    const me = web3.account?.toLowerCase();
+    // A jackpot is announced after the winning bet's own result
+    for (const rec of history.records.slice(0, 20)) {
+      if (rec.type === 'jackpot' && rec.user.toLowerCase() === me && !shownJackpots.has(rec.id) && batch.settled.some((b) => b.betId === rec.betId)) {
+        shownJackpots.add(rec.id);
+        setTimeout(() => showJackpot(rec), 2600);
+      }
     }
   });
   pulse = new PulseFeed({ web3, history, onUpdate: renderPulse });
@@ -1321,7 +1465,8 @@ export function startApp() {
   if (!getConfig().contractAddress) {
     toast('No contract configured', 'Set NEXT_PUBLIC_CONTRACT_ADDRESS (see .env.example).', { error: true, sticky: true });
   }
-  loadProtocolParameters();
+  try { setDuration(Number(localStorage.getItem('mp.duration')) || 30); } catch (_) { setDuration(30); }
+  house.start();
   history.start();
   // A wallet connected before reconnects without a prompt (only if it still authorises this site)
   web3.restoreSession();

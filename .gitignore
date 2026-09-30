@@ -10,6 +10,7 @@ out/
 .env
 .env.*
 !.env.example
+wallet.json
 
 # Local only: personal task log, editor/assistant settings, outdated research scripts
 checklist.md
@@ -20,3 +21,7 @@ archive/
 *.log
 .vscode/
 .idea/
+
+# Scratch / tooling caches
+.sf/
+*_tmp.mjs

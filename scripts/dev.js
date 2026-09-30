@@ -6,27 +6,31 @@
  * Usage: npm run dev                 relay + app
  *        npm run dev:testnet         relay + keeper (live, Monad testnet) + app; needs KEEPER_PRIVATE_KEY
  *                                    and NEXT_PUBLIC_CONTRACT_ADDRESS in .env. The keeper only sends
- *                                    transactions for rounds that have bets.
+ *                                    transactions for pending bets.
  */
 
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const bin = (name) => path.join(root, 'node_modules', '.bin', name);
+// On Windows, node_modules/.bin holds a .cmd/.ps1 shim, not something spawn() can exec directly by that
+// bare name (no shebang); it needs the platform's own extension.
+const bin = (name) => path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name);
 
 const procs = [
   { name: 'relay', color: 36, cmd: process.execPath, args: ['--env-file-if-exists=.env', 'scripts/price_relay.js'] },
-  { name: 'app', color: 35, cmd: bin('next'), args: ['dev', '-p', process.env.PORT_APP || '3000'] }
+  // next.cmd is a shell shim on Windows: it needs a shell to run it, unlike node.exe below (whose own
+  // path may contain spaces, e.g. "Program Files" - shell:true must stay off that one or it breaks).
+  { name: 'app', color: 35, cmd: bin('next'), args: ['dev', '-p', process.env.PORT_APP || '3000'], shell: process.platform === 'win32' }
 ];
 if (process.argv.includes('--with-keeper')) {
-  procs.push({ name: 'keeper', color: 33, cmd: process.execPath, args: ['--env-file-if-exists=.env', 'scripts/keeper_bot.js', '--mode', 'live', '--network', 'testnet'] });
+  procs.push({ name: 'keeper', color: 33, cmd: process.execPath, args: ['--env-file-if-exists=.env', 'scripts/house_keeper.js', '--mode', 'live', '--network', 'testnet'] });
 }
 
 let stopping = false;
-const children = procs.map(({ name, color, cmd, args }) => {
-  const child = spawn(cmd, args, { cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+const children = procs.map(({ name, color, cmd, args, shell = false }) => {
+  const child = spawn(cmd, args, { cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], shell });
   const tag = `\x1b[${color}m[${name}]\x1b[0m `;
   const pipe = (stream, out) => {
     let buf = '';
@@ -50,7 +54,13 @@ const children = procs.map(({ name, color, cmd, args }) => {
 
 function stop(code = 0) {
   stopping = true;
-  for (const c of children) if (c.exitCode === null) c.kill('SIGTERM');
+  for (const c of children) {
+    if (c.exitCode !== null) continue;
+    // On Windows, a shell-spawned child (next.cmd) is really cmd.exe; killing just that leaves the
+    // actual `next dev` node process it launched orphaned on the port. taskkill /T kills the whole tree.
+    if (process.platform === 'win32') exec(`taskkill /pid ${c.pid} /T /F`, () => {});
+    else c.kill('SIGTERM');
+  }
   setTimeout(() => process.exit(code), 500);
 }
 

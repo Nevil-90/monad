@@ -1,37 +1,23 @@
 /**
  * ChainHistory.js
- * Reads the AMM contract's events straight from the chain so every number the UI shows can be
- * traced to a transaction. Nothing is stored server-side.
+ * Reads the house contract's events so every number the UI shows can be traced to a transaction.
+ * Nothing is stored server-side.
  *
  * - Loads the contract's complete event history in one request from the relay's index
- *   (scripts/lib/event_index.js), then follows new blocks. Monad's public RPCs serve at most 100
- *   blocks per log request, too slow to scan from the browser. Every record keeps its transaction
- *   hash, so each row links to the explorer and can be checked independently.
- * - Totals shown as "contract counter" are read from the contract itself over Monad RPC.
- * - Classifies each PayoutClaimed as a win or a refund from how its round ended.
- *
- * For very long histories, point the dashboard at an indexer that serves the same records.
+ *   (scripts/lib/event_index.js), then follows new blocks pushed over Server-Sent Events. Monad's
+ *   public RPCs serve at most 100 blocks per log request, too slow to scan from the browser. Every
+ *   record keeps its transaction hash, so each row links to the explorer.
+ * - Bets are tracked from BetPlaced to BetSettled; strike and result prices from PriceRecorded.
+ * - House totals (vault, jackpot, all-time wagered and paid) are read from the contract itself when
+ *   bets settle.
  */
 
 import { ethers } from 'ethers';
 import { API_CONFIG, SUPPORTED_MARKETS, getConfig } from './config.js';
 
-const CONCURRENCY = 6;
 const toMon = (v) => Number(ethers.formatEther(v));
-const toPrice = (v) => Number(ethers.formatUnits(v, 36));
-
-async function mapLimit(items, limit, fn) {
-  const out = new Array(items.length);
-  let i = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx]);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
+const PRICE_DECIMALS = 8;
+const STATUS = ['None', 'Pending', 'Won', 'Lost', 'Push', 'Void'];
 
 export class ChainHistory {
   constructor(web3) {
@@ -40,25 +26,26 @@ export class ChainHistory {
     this.deployBlock = cfg.deployBlock;
     this.relayUrl = API_CONFIG.priceRelayUrl;
 
-    this.records = [];              // money movements and market creations, newest first
+    this.records = [];              // money movements, newest first
     this.seen = new Set();          // `${tx}:${logIndex}`
-    this.rounds = new Map();        // `${marketId}:${roundId}` -> round summary
-    this.markets = new Map();       // marketId -> { symbol, name, creator, listed }
+    this.bets = new Map();          // betId -> bet
+    this.prices = new Map();        // `${marketId}:${ts}` -> price (number)
+    this.markets = new Map();       // marketId -> { symbol, name, listed }
     this.blockTimes = new Map();
     this.oldest = null;
     this.newest = null;
     this.status = 'idle';           // idle | syncing | live | error
     this.error = null;
     this.listeners = new Set();
-    this.marketListeners = new Set(); // (Set of marketIds touched by new events) => void
-    this.gasListeners = new Set();    // (gasPrice wei: bigint) => void
+    this.betListeners = new Set();  // ({ placed: bet[], settled: bet[], prices: key[] }) => void
+    this.gasListeners = new Set();
+    this.houseListeners = new Set();
     this.gasPrice = null;
-    this.touched = new Set();
     this.started = false;
-    this.totals = { paidToWinners: null, settledVolume: null };
+    this.house = null;              // contract views (fetchHouse), refreshed when bets settle
 
     for (const m of Object.values(SUPPORTED_MARKETS)) {
-      this.markets.set(m.marketId.toLowerCase(), { symbol: m.symbol, name: m.name, creator: null, listed: true });
+      this.markets.set(m.marketId.toLowerCase(), { symbol: m.symbol, name: m.name, listed: true });
     }
   }
 
@@ -74,13 +61,12 @@ export class ChainHistory {
     for (const fn of this.listeners) fn(this);
   }
 
-  /** Called with the market ids that new contract events touched (pushed by the relay, never polled) */
-  onMarketEvents(fn) {
-    this.marketListeners.add(fn);
-    return () => this.marketListeners.delete(fn);
+  /** Called with the bets placed/settled and prices recorded by each batch of new events */
+  onBets(fn) {
+    this.betListeners.add(fn);
+    return () => this.betListeners.delete(fn);
   }
 
-  /** Called with the network gas price whenever the relay pushes a new one */
   onGas(fn) {
     this.gasListeners.add(fn);
     if (this.gasPrice !== null) fn(this.gasPrice);
@@ -88,8 +74,10 @@ export class ChainHistory {
   }
 
   hasOlder() {
-    return this.oldest !== null && this.oldest > this.deployBlock;
+    return false; // the relay serves the complete history since deployment
   }
+
+  async loadOlder() {}
 
   marketLabel(marketId) {
     const m = this.markets.get(String(marketId).toLowerCase());
@@ -100,6 +88,10 @@ export class ChainHistory {
     return Boolean(this.markets.get(String(marketId).toLowerCase())?.listed);
   }
 
+  price(marketId, ts) {
+    return this.prices.get(`${String(marketId).toLowerCase()}:${ts}`) ?? null;
+  }
+
   // ---------------------------------------------------------------------------
   // Sync
   // ---------------------------------------------------------------------------
@@ -107,33 +99,21 @@ export class ChainHistory {
   async start() {
     if (this.started) return;
     this.started = true;
-    if (!this.address) {
-      this.status = 'error';
-      this.error = 'No contract address configured (NEXT_PUBLIC_CONTRACT_ADDRESS).';
-      this.notify();
-      return;
-    }
-    if (this.deployBlock === null || !Number.isFinite(this.deployBlock)) {
-      this.status = 'error';
-      this.error = 'Contract deploy block not configured (NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK).';
-      this.notify();
-      return;
-    }
-    if (!this.relayUrl) {
-      this.status = 'error';
-      this.error = 'The Dashboard reads the contract events indexed by the relay: set NEXT_PUBLIC_PRICE_RELAY_URL.';
-      this.notify();
-      return;
-    }
+    if (!this.address) return this.fail('No contract address configured (NEXT_PUBLIC_CONTRACT_ADDRESS).');
+    if (this.deployBlock === null || !Number.isFinite(this.deployBlock)) return this.fail('Contract deploy block not configured (NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK).');
+    if (!this.relayUrl) return this.fail('Bets and results are read from the relay: set NEXT_PUBLIC_PRICE_RELAY_URL.');
     this.status = 'syncing';
     this.notify();
     this.connect();
   }
 
-  /**
-   * Opens the relay's event stream: the whole history first, then new events pushed as blocks are
-   * indexed. EventSource reconnects on its own; on reconnect it resumes after the newest block seen.
-   */
+  fail(message) {
+    this.status = 'error';
+    this.error = message;
+    this.notify();
+  }
+
+  /** The relay's event stream: the whole history first, then new events as blocks are indexed */
   connect() {
     const after = this.newest === null ? this.deployBlock - 1 : this.newest;
     this.es = new EventSource(`${this.relayUrl}/events/stream?after=${after}`);
@@ -142,7 +122,6 @@ export class ChainHistory {
       this.status = 'error';
       this.error = 'Connection to the relay dropped. Reconnecting…';
       this.notify();
-      // Reopen with a fresh `after` so nothing is fetched twice
       this.es.close();
       clearTimeout(this.retry);
       this.retry = setTimeout(() => this.connect(), 3000);
@@ -150,6 +129,7 @@ export class ChainHistory {
   }
 
   async apply(body) {
+    const batch = { placed: [], settled: [], prices: [], initial: this.newest === null };
     try {
       if (body.address.toLowerCase() !== this.address.toLowerCase()) {
         throw new Error(`The relay indexes ${body.address}, not this app's contract ${this.address}.`);
@@ -161,165 +141,140 @@ export class ChainHistory {
           for (const fn of this.gasListeners) fn(gas);
         }
       }
-      const pendingClaims = [];
       for (const log of body.logs) {
-        this.blockTimes.set(log.blockNumber, log.timestamp * 1000); // relay sends seconds; the UI uses ms
-        const rec = this.ingest(log);
-        if (rec && rec.type === 'claim') pendingClaims.push(rec);
+        this.blockTimes.set(log.blockNumber, log.timestamp * 1000); // relay sends seconds
+        this.ingest(log, batch);
       }
       this.records.sort((x, y) => (y.block - x.block) || (y.logIndex - x.logIndex));
-      await this.classifyClaims(pendingClaims);
-      const first = this.newest === null;
       this.oldest = this.deployBlock;
       this.newest = Math.max(this.newest ?? body.head, body.head);
-      // All-time totals change only when a round settles: re-read them then, not on every bet
-      if (first || this.settledSinceTotals) {
-        this.settledSinceTotals = false;
-        await this.refreshTotals();
-      }
+      // House totals are re-read in the background: views update from the events at once, never
+      // waiting behind contract reads (the RPC client is rate-paced)
+      if (batch.initial || batch.settled.length || batch.placed.length || batch.money) this.refreshHouse();
       this.status = 'live';
       this.error = null;
-      if (this.touched.size) {
-        const touched = this.touched;
-        this.touched = new Set();
-        for (const fn of this.marketListeners) fn(touched);
-      }
     } catch (err) {
       this.status = 'error';
       this.error = err.message;
       this.es?.close();
     }
+    if (batch.placed.length || batch.settled.length || batch.prices.length || batch.money || batch.initial) {
+      for (const fn of this.betListeners) {
+        // One failing view must not stop the others (or the history) from updating
+        try { fn(batch); } catch (err) { console.error('Bet update failed:', err); }
+      }
+    }
     this.notify();
   }
 
-  // The relay serves the complete history since deployment
-  async loadOlder() {}
+  /** One read at a time; requests made meanwhile collapse into one more read after it */
+  async refreshHouse() {
+    if (this.houseReading) {
+      this.houseStale = true;
+      return;
+    }
+    this.houseReading = true;
+    try {
+      do {
+        this.houseStale = false;
+        try {
+          this.house = await this.web3.fetchHouse();
+        } catch (err) {
+          console.warn('Could not read the house state:', err.message);
+        }
+      } while (this.houseStale);
+    } finally {
+      this.houseReading = false;
+    }
+    for (const fn of this.houseListeners) fn(this.house);
+    this.notify();
+  }
 
-  ingest(log) {
+  /** Called with the contract's house state each time it has been re-read */
+  onHouse(fn) {
+    this.houseListeners.add(fn);
+    return () => this.houseListeners.delete(fn);
+  }
+
+  ingest(log, batch) {
     const key = `${log.transactionHash}:${log.index ?? log.logIndex}`;
-    if (this.seen.has(key)) return null;
+    if (this.seen.has(key)) return;
     this.seen.add(key);
 
     let ev;
-    try {
-      ev = this.web3.iface.parseLog(log);
-    } catch (_) {
-      return null;
-    }
-    if (!ev) return null;
+    try { ev = this.web3.iface.parseLog(log); } catch (_) { return; }
+    if (!ev) return;
 
-    const base = { id: key, block: log.blockNumber, logIndex: log.index ?? log.logIndex, tx: log.transactionHash };
+    const base = { id: key, block: log.blockNumber, logIndex: log.index ?? log.logIndex, tx: log.transactionHash, time: log.timestamp * 1000 };
     const a = ev.args;
-    if (a.marketId) this.touched.add(String(a.marketId).toLowerCase());
-    const round = (marketId, roundId) => {
-      const k = `${String(marketId).toLowerCase()}:${roundId}`;
-      if (!this.rounds.has(k)) {
-        this.rounds.set(k, { key: k, marketId: String(marketId).toLowerCase(), roundId: Number(roundId), status: null, bettors: new Set(), up: 0, down: 0 });
-      }
-      return this.rounds.get(k);
-    };
-
+    const marketId = a.marketId ? String(a.marketId).toLowerCase() : undefined;
     let rec = null;
     switch (ev.name) {
       case 'BetPlaced': {
-        const side = Number(a.side) === 1 ? 'UP' : 'DOWN';
-        const amount = toMon(a.amount);
-        const r = round(a.marketId, a.roundId);
-        r.bettors.add(a.user.toLowerCase());
-        if (side === 'UP') r.up += amount; else r.down += amount;
-        rec = { ...base, type: 'bet', user: a.user, side, amount, marketId: String(a.marketId).toLowerCase(), roundId: Number(a.roundId) };
+        const bet = {
+          betId: Number(a.betId),
+          user: a.player,
+          marketId,
+          side: Number(a.side) === 1 ? 'UP' : 'DOWN',
+          stake: toMon(a.stake),
+          payout: toMon(a.payout),
+          startTs: Number(a.startTs),
+          endTs: Number(a.startTs) + Number(a.duration),
+          duration: Number(a.duration),
+          streakBet: a.streakBet,
+          status: 'Pending',
+          paid: 0,
+          placedAt: base.time,
+          tx: base.tx,
+          block: base.block
+        };
+        this.bets.set(bet.betId, { ...this.bets.get(bet.betId), ...bet });
+        batch.placed.push(bet);
+        rec = { ...base, type: 'bet', user: a.player, side: bet.side, amount: bet.stake, marketId, betId: bet.betId };
         break;
       }
-      case 'PayoutClaimed':
-        rec = { ...base, type: 'claim', user: a.user, amount: toMon(a.amount), marketId: String(a.marketId).toLowerCase(), roundId: Number(a.roundId) };
-        break;
-      case 'CreatorFeesClaimed':
-        rec = { ...base, type: 'creatorFee', user: a.creator, amount: toMon(a.amount), marketId: String(a.marketId).toLowerCase() };
-        break;
-      case 'TreasuryWithdrawn':
-        rec = { ...base, type: 'treasury', user: a.recipient, amount: toMon(a.amount), marketId: String(a.marketId).toLowerCase() };
-        break;
-      case 'KeeperRewardClaimed':
-        rec = { ...base, type: 'keeperReward', user: a.keeper, amount: toMon(a.amount) };
-        break;
-      case 'MarketCreated': {
-        const id = String(a.marketId).toLowerCase();
-        const known = this.markets.get(id);
-        this.markets.set(id, { symbol: a.symbol, name: a.name, creator: a.creator, listed: Boolean(known?.listed) });
-        rec = { ...base, type: 'market', user: a.creator, amount: 0, marketId: id, symbol: a.symbol };
+      case 'BetSettled': {
+        const bet = this.bets.get(Number(a.betId)) || { betId: Number(a.betId), user: a.player, marketId };
+        bet.status = STATUS[Number(a.status)] || 'None';
+        bet.paid = toMon(a.paid);
+        bet.startPrice = a.startPrice > 0n ? Number(ethers.formatUnits(a.startPrice, PRICE_DECIMALS)) : null;
+        bet.endPrice = a.endPrice > 0n ? Number(ethers.formatUnits(a.endPrice, PRICE_DECIMALS)) : null;
+        bet.streakAfter = Number(a.streak);
+        bet.settleTx = base.tx;
+        bet.settleBlock = base.block;
+        bet.settledAt = base.time;
+        this.bets.set(bet.betId, bet);
+        batch.settled.push(bet);
+        if (bet.status === 'Won') rec = { ...base, type: 'win', user: a.player, amount: bet.paid, marketId, betId: bet.betId, side: bet.side };
+        else if (bet.status === 'Push' || bet.status === 'Void') rec = { ...base, type: 'refund', user: a.player, amount: bet.paid, marketId, betId: bet.betId };
         break;
       }
-      case 'RoundLocked': {
-        const r = round(a.marketId, a.roundId);
-        r.lockPrice = toPrice(a.lockPrice);
-        r.lockBlock = base.block;
+      case 'JackpotWon':
+        rec = { ...base, type: 'jackpot', user: a.player, amount: toMon(a.amount), betId: Number(a.betId), streak: Number(a.streak) };
+        batch.money = true;
+        break;
+      case 'PriceRecorded': {
+        const k = `${marketId}:${Number(a.ts)}`;
+        this.prices.set(k, Number(ethers.formatUnits(a.price, PRICE_DECIMALS)));
+        batch.prices.push(k);
         break;
       }
-      case 'RoundSettled': {
-        this.settledSinceTotals = true;
-        const r = round(a.marketId, a.roundId);
-        r.status = 'settled';
-        r.closePrice = toPrice(a.closePrice);
-        r.winningSide = Number(a.winningSide) === 1 ? 'UP' : 'DOWN';
-        r.settleTx = base.tx;
-        r.settleBlock = base.block;
-        r.keeper = a.keeper;
+      case 'BalanceWithdrawn':
+        rec = { ...base, type: 'cashout', user: a.player, amount: toMon(a.amount) };
+        batch.money = true;
         break;
-      }
-      case 'RoundCancelled': {
-        const r = round(a.marketId, a.roundId);
-        r.status = 'cancelled';
-        r.reason = a.reason;
-        r.settleTx = base.tx;
-        r.settleBlock = base.block;
+      case 'LiquidityAdded':
+        rec = { ...base, type: 'lpIn', user: a.provider, amount: toMon(a.amount) };
+        batch.money = true;
         break;
-      }
+      case 'LiquidityRemoved':
+        rec = { ...base, type: 'lpOut', user: a.provider, amount: toMon(a.amount) };
+        batch.money = true;
+        break;
       default:
         break;
     }
     if (rec) this.records.push(rec);
-    return rec;
-  }
-
-  /** Claims pay either winnings (settled round) or refunds (cancelled round) */
-  async classifyClaims(claims) {
-    const unknown = [];
-    for (const c of claims) {
-      const r = this.rounds.get(`${c.marketId}:${c.roundId}`);
-      if (r && r.status) c.type = r.status === 'settled' ? 'win' : 'refund';
-      else unknown.push(c);
-    }
-    await mapLimit(unknown, CONCURRENCY, async (c) => {
-      const onChain = await this.web3.fetchOnChainRound(c.marketId, c.roundId);
-      if (!onChain) return;
-      const r = this.rounds.get(`${c.marketId}:${c.roundId}`);
-      if (r && !r.status) {
-        r.status = onChain.status === 3 ? 'settled' : onChain.status === 4 ? 'cancelled' : null;
-        if (onChain.winningSide) r.winningSide = onChain.winningSide === 1 ? 'UP' : 'DOWN';
-      }
-      c.type = onChain.status === 3 ? 'win' : 'refund';
-    });
-  }
-
-  async refreshTotals() {
-    const iface = this.web3.iface;
-    let paid = 0;
-    let volume = 0;
-    let ok = false;
-    for (const marketId of this.markets.keys()) {
-      try {
-        const hex = await this.web3.ethCall(iface.encodeFunctionData('totalWinnings', [marketId]));
-        if (hex && hex !== '0x') {
-          paid += toMon(iface.decodeFunctionResult('totalWinnings', hex)[0]);
-          ok = true;
-        }
-        const m = await this.web3.fetchOnChainMarket(marketId);
-        if (m && m.totalVolume !== undefined) volume += toMon(m.totalVolume);
-      } catch (_) {
-        // Market not on this contract
-      }
-    }
-    this.totals = ok ? { paidToWinners: paid, settledVolume: volume } : { paidToWinners: null, settledVolume: null };
   }
 
   async blockTime(n) {
@@ -332,19 +287,29 @@ export class ChainHistory {
   }
 
   // ---------------------------------------------------------------------------
-  // Views over the loaded history
+  // Views
   // ---------------------------------------------------------------------------
 
+  /** Bets, newest first; optionally one wallet's */
+  betsList(account = null) {
+    const me = account ? account.toLowerCase() : null;
+    return [...this.bets.values()]
+      .filter((b) => b.user && (!me || b.user.toLowerCase() === me))
+      .sort((x, y) => y.betId - x.betId);
+  }
+
   summary() {
-    const s = { betsCount: 0, riseIn: 0, fallIn: 0, wins: 0, refunds: 0, fees: 0, wallets: new Set() };
+    const s = { betsCount: 0, riseIn: 0, fallIn: 0, wins: 0, refunds: 0, jackpots: 0, lpIn: 0, lpOut: 0, wallets: new Set() };
     for (const r of this.records) {
       if (r.type === 'bet') {
-        s.wallets.add(r.user.toLowerCase()); // players: wallets that placed a bet
+        s.wallets.add(r.user.toLowerCase());
         s.betsCount++;
         if (r.side === 'UP') s.riseIn += r.amount; else s.fallIn += r.amount;
       } else if (r.type === 'win') s.wins += r.amount;
       else if (r.type === 'refund') s.refunds += r.amount;
-      else if (r.type === 'creatorFee' || r.type === 'treasury' || r.type === 'keeperReward') s.fees += r.amount;
+      else if (r.type === 'jackpot') s.jackpots += r.amount;
+      else if (r.type === 'lpIn') s.lpIn += r.amount;
+      else if (r.type === 'lpOut') s.lpOut += r.amount;
     }
     return { ...s, walletCount: s.wallets.size };
   }
@@ -353,33 +318,26 @@ export class ChainHistory {
     const map = new Map();
     const get = (addr) => {
       const k = addr.toLowerCase();
-      if (!map.has(k)) map.set(k, { address: addr, bets: 0, staked: 0, won: 0, refunded: 0, fees: 0, wins: 0, losses: 0, lastBlock: 0, rounds: new Set() });
+      if (!map.has(k)) map.set(k, { address: addr, bets: 0, staked: 0, won: 0, refunded: 0, jackpots: 0, wins: 0, losses: 0, lastBlock: 0 });
       return map.get(k);
     };
     for (const r of this.records) {
-      if (!r.user) continue;
+      if (!r.user || r.type === 'lpIn' || r.type === 'lpOut' || r.type === 'cashout') continue;
       const w = get(r.user);
       w.lastBlock = Math.max(w.lastBlock, r.block);
       if (r.type === 'bet') {
         w.bets++;
         w.staked += r.amount;
-        // Win rate counts each round once, however many bets the wallet placed in it
-        const roundKey = `${r.marketId}:${r.roundId}`;
-        const round = this.rounds.get(roundKey);
-        if (round?.status === 'settled' && !w.rounds.has(roundKey)) {
-          w.rounds.add(roundKey);
-          if (round.winningSide === r.side) w.wins++; else w.losses++;
-        }
       } else if (r.type === 'win') w.won += r.amount;
       else if (r.type === 'refund') w.refunded += r.amount;
-      else if (r.type === 'creatorFee' || r.type === 'treasury' || r.type === 'keeperReward') w.fees += r.amount;
+      else if (r.type === 'jackpot') w.jackpots += r.amount;
     }
-    return [...map.values()].map(({ rounds, ...w }) => ({ ...w, net: w.won + w.refunded - w.staked }));
-  }
-
-  roundsList() {
-    return [...this.rounds.values()]
-      .filter((r) => r.status)
-      .sort((a, b) => (b.settleBlock || 0) - (a.settleBlock || 0));
+    for (const b of this.bets.values()) {
+      if (!b.user) continue;
+      const w = get(b.user);
+      if (b.status === 'Won') w.wins++;
+      else if (b.status === 'Lost') w.losses++;
+    }
+    return [...map.values()].map((w) => ({ ...w, net: w.won + w.refunded + w.jackpots - w.staked }));
   }
 }

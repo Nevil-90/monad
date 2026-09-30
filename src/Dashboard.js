@@ -1,6 +1,6 @@
 /**
  * Dashboard.js
- * Transparency view: who put money in, who took money out, and where fees went.
+ * Transparency view: every bet, win, jackpot, cash-out and vault deposit on the house contract.
  * Everything is derived from ChainHistory (contract events) and links to the explorer.
  */
 
@@ -14,14 +14,14 @@ const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const ACTIVITY = {
   bet: { in: true },
   win: { label: 'Won', cls: 'win' },
-  refund: { label: 'Refund', cls: 'refund' },
-  claim: { label: 'Payout', cls: 'refund' },
-  creatorFee: { label: 'Creator fee', cls: 'fee' },
-  treasury: { label: 'Treasury', cls: 'fee' },
-  keeperReward: { label: 'Keeper reward', cls: 'fee' },
-  market: { label: 'New market', cls: 'market' }
+  jackpot: { label: 'Jackpot', cls: 'win' },
+  refund: { label: 'Stake back', cls: 'refund' },
+  cashout: { label: 'Cash out', cls: 'fee' },
+  lpIn: { label: 'Vault deposit', cls: 'market', in: true },
+  lpOut: { label: 'Vault withdrawal', cls: 'market' }
 };
-const FEE_TYPES = new Set(['creatorFee', 'treasury', 'keeperReward']);
+const LP_TYPES = new Set(['lpIn', 'lpOut']);
+const STATUS_LABEL = { Pending: 'Running', Won: 'Won', Lost: 'Lost', Push: 'Tie · stake back', Void: 'No price · stake back' };
 
 export class Dashboard {
   constructor({ history, explorerUrl, getAccount }) {
@@ -130,7 +130,7 @@ export class Dashboard {
 
     const rows = this.tab === 'activity' ? this.activityRows()
       : this.tab === 'wallets' ? this.walletRows()
-        : this.roundRows();
+        : this.betRows();
     const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
     this.page = Math.min(this.page, pages - 1);
     const slice = rows.slice(this.page * PAGE_SIZE, (this.page + 1) * PAGE_SIZE);
@@ -143,12 +143,12 @@ export class Dashboard {
     } else if (this.tab === 'wallets') {
       table.innerHTML = this.walletTable(slice);
     } else {
-      table.innerHTML = this.roundTable(slice);
+      table.innerHTML = this.betTable(slice);
     }
 
     const from = rows.length ? this.page * PAGE_SIZE + 1 : 0;
     const to = Math.min(rows.length, (this.page + 1) * PAGE_SIZE);
-    const noun = this.tab === 'activity' ? 'events' : this.tab === 'wallets' ? 'wallets' : 'rounds';
+    const noun = this.tab === 'activity' ? 'events' : this.tab === 'wallets' ? 'wallets' : 'bets';
     this.el('dash-count').textContent = rows.length ? `${fmtInt(from)}–${fmtInt(to)} of ${fmtInt(rows.length)} ${noun}` : `0 ${noun}`;
     this.el('dash-page').textContent = `${this.page + 1} / ${pages}`;
     this.el('dash-prev').disabled = this.page === 0;
@@ -164,7 +164,6 @@ export class Dashboard {
       : '';
 
     this.fillBlockTimes();
-    if (this.tab === 'rounds') this.fillRoundDetails(slice);
   }
 
   renderHeader() {
@@ -187,28 +186,30 @@ export class Dashboard {
   renderStats() {
     const h = this.history;
     const s = h.summary();
-    this.el('ds-paid').textContent = h.totals.paidToWinners === null ? '—' : `${fmtMon(h.totals.paidToWinners)} MON`;
-    this.el('ds-volume').textContent = h.totals.settledVolume === null ? '—' : `${fmtMon(h.totals.settledVolume)} MON`;
+    const house = h.house;
+    const mon = (v) => Number(v) / 1e18;
+    this.el('ds-paid').textContent = house ? `${fmtMon(mon(house.totalPaidOut))} MON` : '—';
+    this.el('ds-volume').textContent = house ? `${fmtMon(mon(house.totalWagered))} MON` : '—';
     // Counts are all-time once the full history is loaded; until then they would undercount
     const complete = h.status === 'live';
     this.el('ds-wallets').textContent = complete ? fmtInt(s.walletCount) : '—';
     this.el('ds-bets').textContent = complete ? fmtInt(s.betsCount) : '—';
 
-    // Money flow: what came in, what left, and what is still in the contract
+    // Money flow: what players staked and what the house paid them (credited to their in-game balance)
     const inTotal = s.riseIn + s.fallIn;
-    const outTotal = s.wins + s.refunds + s.fees;
+    const outTotal = s.wins + s.refunds + s.jackpots;
     const scale = Math.max(inTotal, outTotal, 1e-9);
     const seg = (v, cls, title) => (v > 0 ? `<span class="flow-seg ${cls}" style="width:${(v / scale) * 100}%" title="${escapeHtml(title)}"></span>` : '');
     this.el('flow-in').innerHTML = seg(s.riseIn, 'rise', `Rise bets ${fmtMon(s.riseIn)} MON`) + seg(s.fallIn, 'fall', `Fall bets ${fmtMon(s.fallIn)} MON`);
-    this.el('flow-out').innerHTML = seg(s.wins, 'win', `To winners ${fmtMon(s.wins)} MON`) + seg(s.refunds, 'refund', `Refunds ${fmtMon(s.refunds)} MON`) + seg(s.fees, 'fee', `Fees paid out ${fmtMon(s.fees)} MON`);
+    this.el('flow-out').innerHTML = seg(s.wins, 'win', `Wins ${fmtMon(s.wins)} MON`) + seg(s.jackpots, 'fee', `Jackpots ${fmtMon(s.jackpots)} MON`) + seg(s.refunds, 'refund', `Stakes back ${fmtMon(s.refunds)} MON`);
     this.el('flow-in-total').textContent = `${fmtMon(inTotal)} MON`;
     this.el('flow-out-total').textContent = `${fmtMon(outTotal)} MON`;
-    const held = Math.max(0, inTotal - outTotal);
+    const vault = house ? `${fmtMon(mon(house.vaultAssets))}` : '—';
     this.el('flow-legend').innerHTML = [
       ['rise', 'Rise bets', s.riseIn], ['fall', 'Fall bets', s.fallIn],
-      ['win', 'Paid to winners', s.wins], ['refund', 'Refunds', s.refunds], ['fee', 'Fees paid out', s.fees]
+      ['win', 'Wins', s.wins], ['fee', 'Jackpots', s.jackpots], ['refund', 'Stakes back', s.refunds]
     ].map(([cls, label, v]) => `<span class="legend-item"><span class="legend-dot ${cls}"></span>${label} <b class="num">${fmtMon(v)}</b></span>`).join('')
-      + `<span class="legend-item legend-held">Still in contract (unclaimed or open rounds) <b class="num">${fmtMon(held)}</b></span>`;
+      + `<span class="legend-item legend-held">House vault <b class="num">${vault}</b></span>`;
   }
 
   renderMarketOptions() {
@@ -245,7 +246,7 @@ export class Dashboard {
     return this.history.records.filter((r) => {
       if (this.market !== 'all' && r.marketId !== this.market) return false;
       if (this.type !== 'all') {
-        if (this.type === 'fee' ? !FEE_TYPES.has(r.type) : r.type !== this.type) return false;
+        if (this.type === 'lp' ? !LP_TYPES.has(r.type) : r.type !== this.type) return false;
       }
       return this.matchesQuery(r);
     });
@@ -260,15 +261,14 @@ export class Dashboard {
     }
     if (this.query) rows = rows.filter((w) => w.address.toLowerCase().includes(this.query));
     const { key, dir } = this.sort;
-    const val = (w) => (key === 'winrate' ? (w.wins + w.losses ? w.wins / (w.wins + w.losses) : -1) : key === 'out' ? w.won + w.refunded : w[key]);
+    const val = (w) => (key === 'winrate' ? (w.wins + w.losses ? w.wins / (w.wins + w.losses) : -1) : key === 'out' ? w.won + w.refunded + w.jackpots : w[key]);
     return rows.sort((a, b) => (val(a) - val(b)) * dir);
   }
 
-  roundRows() {
-    // Rounds nobody bet on are rolled forward by keepers; they move no money, so they are hidden
-    let rows = this.history.roundsList().filter((r) => !(r.status === 'cancelled' && r.bettors.size === 0 && (!r.exact || r.exact.pool === 0)));
-    if (this.market !== 'all') rows = rows.filter((r) => r.marketId === this.market);
-    if (this.query) rows = rows.filter((r) => (r.settleTx || '').toLowerCase().startsWith(this.query) || [...r.bettors].some((b) => b.includes(this.query)));
+  betRows() {
+    let rows = this.history.betsList();
+    if (this.market !== 'all') rows = rows.filter((b) => b.marketId === this.market);
+    if (this.query) rows = rows.filter((b) => (b.tx || '').toLowerCase().startsWith(this.query) || (b.settleTx || '').toLowerCase().startsWith(this.query) || (b.user || '').toLowerCase().includes(this.query));
     return rows;
   }
 
@@ -301,22 +301,20 @@ export class Dashboard {
         const a = ACTIVITY[r.type] || { label: r.type, cls: '' };
         what = `<span class="act ${a.cls}">${a.label}</span>`;
       }
-      const isIn = r.type === 'bet';
-      const amount = r.type === 'market'
-        ? `<span class="muted">${escapeHtml(r.symbol || '')}</span>`
-        : `<span class="amt-val"><span class="dir ${isIn ? 'in' : 'out'}">${isIn ? 'Put in' : 'Took out'}</span> <b class="num">${fmtMon(r.amount)}</b></span>`;
+      const isIn = Boolean(ACTIVITY[r.type]?.in);
+      const amount = `<span class="amt-val"><span class="dir ${isIn ? 'in' : 'out'}">${isIn ? 'Put in' : 'Paid'}</span> <b class="num">${fmtMon(r.amount)}</b></span>`;
       return `<tr>
         <td data-label="Time">${this.timeCell(r.block)}</td>
         <td data-label="Activity">${what}</td>
         <td data-label="Wallet">${r.user ? this.walletCell(r.user) : '—'}</td>
         <td data-label="Market">${r.marketId ? escapeHtml(this.history.marketLabel(r.marketId)) : '—'}</td>
-        <td data-label="Round" class="num">${r.roundId !== undefined ? fmtInt(r.roundId) : '—'}</td>
+        <td data-label="Bet" class="num">${r.betId !== undefined ? `#${fmtInt(r.betId)}` : '—'}</td>
         <td data-label="Amount (MON)" class="amt">${amount}</td>
         <td data-label="Transaction">${this.txCell(r.tx)}</td>
       </tr>`;
     }).join('');
     return `<table class="dtable"><thead><tr>
-      <th>Time</th><th>Activity</th><th>Wallet</th><th>Market</th><th>Round</th><th class="amt">Amount (MON)</th><th>Transaction</th>
+      <th>Time</th><th>Activity</th><th>Wallet</th><th>Market</th><th>Bet</th><th class="amt">Amount (MON)</th><th>Transaction</th>
     </tr></thead><tbody>${body}</tbody></table>`;
   }
 
@@ -332,37 +330,35 @@ export class Dashboard {
         <td data-label="Wallet">${this.walletCell(w.address)}</td>
         <td data-label="Bets" class="num">${fmtInt(w.bets)}</td>
         <td data-label="Put in" class="amt num">${fmtMon(w.staked)}</td>
-        <td data-label="Took out" class="amt num">${fmtMon(w.won + w.refunded)}</td>
+        <td data-label="Paid" class="amt num">${fmtMon(w.won + w.refunded + w.jackpots)}</td>
         <td data-label="Net" class="amt num ${net > 0 ? 'pos' : net < 0 ? 'neg' : ''}">${net > 0 ? '+' : net < 0 ? '−' : ''}${fmtMon(Math.abs(net))}</td>
         <td data-label="Win rate" class="num">${decided ? `${Math.round((w.wins / decided) * 100)}% <span class="muted">(${w.wins}/${decided})</span>` : '—'}</td>
         <td data-label="Last active">${this.timeCell(w.lastBlock)}</td>
       </tr>`;
     }).join('');
     return `<table class="dtable"><thead><tr>
-      <th>Wallet</th>${th('bets', 'Bets')}${th('staked', 'Put in', 'amt')}${th('out', 'Took out', 'amt')}${th('net', 'Net', 'amt')}${th('winrate', 'Win rate')}${th('lastBlock', 'Last active')}
+      <th>Wallet</th>${th('bets', 'Bets')}${th('staked', 'Put in', 'amt')}${th('out', 'Paid', 'amt')}${th('net', 'Net', 'amt')}${th('winrate', 'Win rate')}${th('lastBlock', 'Last active')}
     </tr></thead><tbody>${body}</tbody></table>
-    <p class="table-note">Took out = claimed wins + refunds. Unclaimed winnings are not counted until the wallet claims them.</p>`;
+    <p class="table-note">Paid = wins, jackpots and stakes returned on ties, credited to the player's in-game balance at settlement.</p>`;
   }
 
-  roundTable(rows) {
-    const body = rows.map((r) => {
-      const result = r.status === 'settled'
-        ? `<span class="act ${r.winningSide === 'UP' ? 'rise' : 'fall'}">${r.winningSide === 'UP' ? '▲ Rise won' : '▼ Fall won'}</span>`
-        : `<span class="act refund" title="${escapeHtml(r.reason || '')}">Refunded</span>`;
-      const fmtP = (p) => (p === undefined ? '—' : p.toLocaleString('en-US', { maximumFractionDigits: 6 }));
+  betTable(rows) {
+    const fmtP = (p) => (p === null || p === undefined ? '—' : p.toLocaleString('en-US', { maximumFractionDigits: 6 }));
+    const body = rows.map((b) => {
+      const cls = b.status === 'Won' ? 'win' : b.status === 'Lost' ? 'fall' : b.status === 'Pending' ? '' : 'refund';
       return `<tr>
-        <td data-label="Round" class="num">${fmtInt(r.roundId)}</td>
-        <td data-label="Market">${escapeHtml(this.history.marketLabel(r.marketId))}</td>
-        <td data-label="Strike → Close" class="num">${fmtP(r.lockPrice)} → ${fmtP(r.closePrice)}</td>
-        <td data-label="Result">${result}</td>
-        <td data-label="Pool (MON)" class="amt num" data-round-pool="${escapeHtml(r.key)}">${fmtMon(r.up + r.down)}</td>
-        <td data-label="Players" class="num" data-round-players="${escapeHtml(r.key)}">${fmtInt(r.bettors.size)}</td>
-        <td data-label="Time">${this.timeCell(r.settleBlock)}</td>
-        <td data-label="Settlement">${r.settleTx ? this.txCell(r.settleTx) : '—'}</td>
+        <td data-label="Bet" class="num">#${fmtInt(b.betId)}</td>
+        <td data-label="Wallet">${b.user ? this.walletCell(b.user) : '—'}</td>
+        <td data-label="Call"><span class="act ${b.side === 'UP' ? 'rise' : 'fall'}">${b.side === 'UP' ? '▲ Rise' : '▼ Fall'}</span> <span class="muted">${escapeHtml(this.history.marketLabel(b.marketId))} · ${b.duration ?? '—'}s</span></td>
+        <td data-label="Strike → Result" class="num">${fmtP(b.startPrice ?? this.history.price(b.marketId, b.startTs))} → ${fmtP(b.endPrice)}</td>
+        <td data-label="Outcome"><span class="act ${cls}">${STATUS_LABEL[b.status] || b.status}</span></td>
+        <td data-label="Stake → Paid (MON)" class="amt num">${fmtMon(b.stake ?? 0)} → ${b.status === 'Pending' ? '—' : fmtMon(b.paid)}</td>
+        <td data-label="Time">${this.timeCell(b.settleBlock || b.block)}</td>
+        <td data-label="Transaction">${this.txCell(b.settleTx || b.tx)}</td>
       </tr>`;
     }).join('');
     return `<table class="dtable"><thead><tr>
-      <th>Round</th><th>Market</th><th>Strike → Close</th><th>Result</th><th class="amt">Pool (MON)</th><th>Players</th><th>Time</th><th>Settlement</th>
+      <th>Bet</th><th>Wallet</th><th>Call</th><th>Strike → Result</th><th>Outcome</th><th class="amt">Stake → Paid (MON)</th><th>Time</th><th>Transaction</th>
     </tr></thead><tbody>${body}</tbody></table>`;
   }
 
@@ -385,24 +381,6 @@ export class Dashboard {
         c.textContent = text;
         c.title = `Block ${b.toLocaleString('en-US')}`;
       });
-    }));
-  }
-
-  /** Bets may predate the loaded history, so read exact pool and player totals from the contract */
-  async fillRoundDetails(rounds) {
-    await Promise.all(rounds.map(async (r) => {
-      if (!r.exact) {
-        const onChain = await this.history.web3.fetchOnChainRound(r.marketId, r.roundId);
-        if (!onChain) return;
-        r.exact = {
-          pool: Number(onChain.totalPool) / 1e18,
-          players: onChain.upBettors !== null ? onChain.upBettors + onChain.downBettors : null
-        };
-      }
-      const pool = document.querySelector(`[data-round-pool="${CSS.escape(r.key)}"]`);
-      const players = document.querySelector(`[data-round-players="${CSS.escape(r.key)}"]`);
-      if (pool) pool.textContent = fmtMon(r.exact.pool);
-      if (players && r.exact.players !== null) players.textContent = fmtInt(r.exact.players);
     }));
   }
 }
