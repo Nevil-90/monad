@@ -10,6 +10,7 @@
     "test": "node test/app_logic.test.js",
     "test:house": "node test/house_evm.test.js",
     "test:security": "node test/reentrancy.test.js",
+    "test:load": "node test/load_20_users.test.js",
     "test:all": "npm run compile && npm test && npm run test:house && npm run test:security",
     "dev:house-chain": "node scripts/dev_house_chain.js",
     "relay": "node --env-file-if-exists=.env scripts/price_relay.js",
