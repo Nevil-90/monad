@@ -135,7 +135,6 @@ export class Web3Manager {
     try {
       return await this.readOnlyProvider.call({ to, data });
     } catch (err) {
-      console.warn('Contract read failed:', err.shortMessage || err.message);
       return null;
     }
   }
@@ -315,7 +314,6 @@ export class Web3Manager {
       return this.balance;
     } catch (err) {
       // Unknown is shown as unknown, never as zero
-      console.warn('Could not fetch on-chain balance:', err);
       this.balance = null;
       this.emit('balanceUpdated', null);
       return null;
@@ -343,7 +341,6 @@ export class Web3Manager {
       }
       return null;
     } catch (err) {
-      console.warn('Could not fetch live gas price:', err);
       return null;
     }
   }
@@ -416,13 +413,21 @@ export class Web3Manager {
     return Web3Manager.walletError(err, name);
   }
 
+  /** Contract revert strings a player can hit, in the player's words */
+  static FRIENDLY_REVERTS = {
+    'Payout below minimum': 'The odds moved before your bet landed, so it was not placed. The price has been updated: try again.',
+    'Odds at limit on this side': 'This side is full for this round: try the other side or the next strike.',
+    'Bet exceeds house limit': 'Above the house limit for one bet right now.',
+    'Bet below minimum': 'Below the minimum bet.'
+  };
+
   revertReason(err) {
     const data = err?.data?.data ?? err?.data ?? err?.error?.data;
     if (typeof data === 'string' && data.startsWith('0x') && data.length > 2) {
       try {
         const parsed = this.iface.parseError(data);
         // require("...") reverts decode as the built-in Error(string): show the message, not "Error"
-        if (parsed?.name === 'Error') return `The contract rejected this: ${parsed.args[0]}`;
+        if (parsed?.name === 'Error') return Web3Manager.FRIENDLY_REVERTS[parsed.args[0]] || `The contract rejected this: ${parsed.args[0]}`;
         if (parsed?.name === 'Panic') return `The contract rejected this: internal check failed (panic 0x${parsed.args[0].toString(16)})`;
         if (parsed) return `The contract rejected this: ${parsed.name}`;
       } catch (_) {
@@ -435,6 +440,9 @@ export class Web3Manager {
         // Undecodable revert data
       }
     }
+    // Some providers only put the reason in the message: execution reverted: "reason" (action=..., data=...)
+    const m = String(err?.message || '').match(/execution reverted: "([^"]+)"/);
+    if (m) return Web3Manager.FRIENDLY_REVERTS[m[1]] || `The contract rejected this: ${m[1]}`;
     return err?.message || 'The network could not simulate this transaction.';
   }
 
@@ -459,7 +467,6 @@ export class Web3Manager {
       return { success: true, txHash };
     } catch (err) {
       const error = this.txError(err);
-      if (!this.isUserRejection(err)) console.warn(`${fn} not sent:`, error);
       return { success: false, error, cancelled: this.isUserRejection(err) };
     }
   }

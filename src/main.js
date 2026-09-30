@@ -603,7 +603,6 @@ export function startApp() {
       } catch (err) {
         if (key !== quoteKey) return;
         quotes = { UP: null, DOWN: null };
-        console.warn('Could not read the odds:', err.message);
       }
       paintOdds();
     }, 200);
@@ -1479,6 +1478,6 @@ export function startApp() {
   // Installable app: the service worker is registered for production builds only, so development
   // always runs fresh code
   if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch((err) => console.warn('Service worker not registered:', err));
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 }

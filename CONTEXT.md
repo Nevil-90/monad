@@ -23,10 +23,17 @@ out after 5 consecutive wins (owner-tunable within bounds).
 
 ## What's been verified, and how
 
-- **151 deterministic checks** (`npm run test:house`) covering settlement (win/lose/push/void), vault
+- **151 deterministic checks** (`npm run test:house`; its timing-dependent sections are pinned to the window, so it passes repeatably) covering settlement (win/lose/push/void), vault
   capacity, LP add/remove/lock, jackpot streak math, every owner-bound setter's every limit, two-step
   ownership transfer, oracle signer timelock, and real captured RedStone signatures.
 - **37 app-logic checks** (`npm test`).
+- **Multi-user load test** (`npm run test:load`): many wallets betting at once against the real contract with
+  the live testnet settings. Solvency held and everything settled at 20 and at 100 simultaneous users. The limits
+  it showed are liquidity (about 15 bets fill the ~20 MON testnet vault) and "Payout below minimum" refusals when
+  many bets move the price at once; the app now says "the odds moved, try again" for those.
+- **Real browser (Playwright, injected test wallet, real testnet money):** connect, Rise/Fall bets, settlement by
+  the keeper, betting from the in-game balance, cash out, LP add, House-tab numbers matching the chain, wallet
+  rejection, wrong network, no wallet, narrow phones (320-414 px), Dashboard, all markets and durations.
 - **A real reentrancy attack** (`npm run test:security`), not just a guard that's assumed to work: a
   purpose-built attacker contract tries to reenter `removeLiquidity` mid-withdrawal. Confirmed blocked.
 - **Live testnet money**, not just simulation: 130+ real bets and full LP add/remove cycles, with the
@@ -53,10 +60,11 @@ out after 5 consecutive wins (owner-tunable within bounds).
   testnet/hackathon submission.
 - `KEEPER_HEALTH_PORT` (a working `/health` endpoint on the keeper) exists but isn't wired to any
   monitoring or alerting.
-- Nothing currently stops two keeper instances from running on the same private key at once — this
-  happened once by accident during testing. Worth a documented rule or a simple lock before it matters.
-- Never tested through an actual browser (no browser automation tool was available this session):
-  wallet chooser, chart rendering, LP add/remove via the real UI.
+- Two keepers on one key: `scripts/house_keeper.js` now holds a per-wallet lock file and refuses a second live
+  keeper on the same machine (verified live). It does not protect two different hosts sharing a key.
+- Not browser-tested: a successful LP withdrawal (deposits lock for one hour), and a real wallet extension
+  such as MetaMask (only an injected test wallet was used). The Vercel deploy itself is untested; the relay and
+  keeper must be hosted somewhere persistent (see README).
 - A live 5-win jackpot and a live void-status bet were never triggered naturally (both are
   probability/time-gated — proven only in the deterministic suite, not with real money).
 - One test wallet's LP position (`lp1_STRANDED` in `wallet.json`) permanently holds shares because its

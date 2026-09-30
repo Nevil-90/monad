@@ -66,7 +66,6 @@ export class PriceStore {
         const oldestId = trades.length ? Math.min(...trades.map((t) => t.trade_id)) : null;
         if (oldestId !== null) await this.backfillTrades(base, oldestId, token);
       } catch (err) {
-        console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
       }
       return;
     }
@@ -90,7 +89,6 @@ export class PriceStore {
       this.bars1m = this.merge(parse(m1), this.bars1m);
     } catch (err) {
       // The chart then starts empty and fills from live ticks; nothing is filled in
-      console.warn(`Price history unavailable for ${market.symbol}:`, err.message);
     }
   }
 

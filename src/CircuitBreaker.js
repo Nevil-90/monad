@@ -75,13 +75,11 @@ export class CircuitBreaker {
   trip(reason) {
     this.isTripped = true;
     this.tripReason = reason;
-    console.warn(`[CIRCUIT BREAKER TRIPPED] ${reason}`);
   }
 
   reset() {
     this.isTripped = false;
     this.tripReason = null;
-    console.log(`[CIRCUIT BREAKER RESET] Protocol feed healthy`);
   }
 
   getStatus() {

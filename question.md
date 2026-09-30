@@ -9,10 +9,10 @@ project unattended, and worth re-reading before mainnet.
    cheap and harmless, not because it's known to solve anything. If the real "insufficient balance"
    pattern recurs on mainnet, this floor might not help — genuinely unknown.
 
-2. **~~Nothing stops two keeper instances from running on the same private key.~~ Addressed in code,
-   not yet exercised.** `scripts/house_keeper.js` now takes a per-wallet lock file (in the OS temp dir,
+2. **~~Nothing stops two keeper instances from running on the same private key.~~ Addressed in code
+   and verified live: a second live keeper is refused with a clear message.** `scripts/house_keeper.js` now takes a per-wallet lock file (in the OS temp dir,
    holding the PID) in live mode and exits with a clear message if a live process already owns it;
-   a lock left by a dead process is taken over. Only syntax-checked so far. Limits: it guards one
+   a lock left by a dead process is taken over. Limits: it guards one
    machine only, not two hosts sharing a key.
 
 3. **There is no way to verify from inside this session that the app keeps running after the terminal

@@ -249,7 +249,7 @@ export class HorizonEngine {
       // One bad frame (e.g. transient state right as a modal closes) must not silently kill every
       // frame after it forever - requestAnimationFrame(loop) below would never run without this.
       if (!document.hidden) {
-        try { this.render(ts); } catch (err) { console.error('Chart frame skipped:', err); }
+        try { this.render(ts); } catch (err) { /* skip this frame; the next one redraws */ }
       }
       requestAnimationFrame(loop);
     };

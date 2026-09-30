@@ -96,7 +96,6 @@ export class HouseState {
         lpUnlockAt: Number(p.lpUnlockAt) * 1000
       };
     } catch (err) {
-      console.warn('Could not read the player state:', err.message);
     }
     this.onUpdate(this);
   }

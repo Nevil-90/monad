@@ -161,7 +161,7 @@ export class ChainHistory {
     if (batch.placed.length || batch.settled.length || batch.prices.length || batch.money || batch.initial) {
       for (const fn of this.betListeners) {
         // One failing view must not stop the others (or the history) from updating
-        try { fn(batch); } catch (err) { console.error('Bet update failed:', err); }
+        try { fn(batch); } catch (err) { /* one bad listener must not stop the others */ }
       }
     }
     this.notify();
@@ -180,7 +180,6 @@ export class ChainHistory {
         try {
           this.house = await this.web3.fetchHouse();
         } catch (err) {
-          console.warn('Could not read the house state:', err.message);
         }
       } while (this.houseStale);
     } finally {

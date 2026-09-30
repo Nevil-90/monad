@@ -138,6 +138,16 @@ network fee stays under 5% of the smallest bet.
 5. **Not done by this repository:** an external audit of `MonadPulseHouse`, and RedStone's written
    confirmation that production use of the public gateway data is allowed.
 
+### Hosting the web app on Vercel (testnet demo)
+
+Vercel serves only the Next.js frontend. The relay and the keeper are long-running processes (an open
+WebSocket, an in-memory event index, settlement timers), so they cannot run as Vercel functions: host
+them on a machine that stays up (Railway, Fly, a VPS; `deploy/` has the Dockerfile) and run exactly one
+keeper. Then, in Vercel, set only the public variables (`NEXT_PUBLIC_CONTRACT_ADDRESS`,
+`NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK`, `NEXT_PUBLIC_PRICE_RELAY_URL` = the relay's HTTPS URL,
+`NEXT_PUBLIC_PRICE_SOURCE`). `NEXT_PUBLIC_*` values are baked in at build time, so a changed relay URL needs
+a redeploy: give the relay a fixed URL. Never put `DEPLOYER_PRIVATE_KEY` or `KEEPER_PRIVATE_KEY` in Vercel.
+
 ## Tests
 
 ```bash
