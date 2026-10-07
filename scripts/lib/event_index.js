@@ -6,21 +6,32 @@
  * every browser. Each log keeps its transaction hash, so every row stays verifiable on the explorer.
  *
  * Nothing is polled: new logs and blocks are pushed over Monad's WebSocket (ChainStream). getLogs runs
- * only to fill gaps, once at start and once after each reconnect.
+ * only to fill gaps, once at start and once after each reconnect. A gap after being offline a while is
+ * caught up a few hundred blocks at a time (the RPC's 100-block cap on eth_getLogs) and logged as it
+ * goes, since on a fast chain that catch-up can take minutes and would otherwise look hung.
  *
  * The index is saved to disk (data/, git-ignored) so a restart does not rescan from the deploy block.
+ * Saves are debounced and async: a burst of new events collapses into one write a little later,
+ * instead of a blocking full-file rewrite on every single event.
  */
 
 import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import { ethers } from 'ethers';
 import { MonadRpcProvider } from '../../src/rpc.js';
 import { ChainStream, wsUrlFor } from './chain_stream.js';
 
 const CHUNK = 100;
-const CONCURRENCY = 4;
+// In-flight getLogs calls; the shared RPC provider paces the actual send rate (src/rpc.js), this just
+// needs to be high enough to keep that budget full given ~1s of latency per call
+const CONCURRENCY = 8;
 // Block-height updates to browsers at most this often (Monad makes ~3 blocks a second)
 const HEAD_PUSH_MS = 2000;
+// How long a burst of save() calls is allowed to coalesce into a single disk write
+const SAVE_DEBOUNCE_MS = 1500;
+// Backfill progress is logged at most this often, so a long catch-up stays visible without spamming
+const PROGRESS_LOG_MS = 5000;
 
 export class EventIndex {
   constructor({ rpcUrl, wsUrl = wsUrlFor(rpcUrl), chainId, address, fromBlock, dataDir, log = console }) {
@@ -56,11 +67,29 @@ export class EventIndex {
     }
   }
 
+  /** Schedules a write; repeated calls within SAVE_DEBOUNCE_MS collapse into the one that fires */
   save() {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.writeFile().catch((err) => this.log.error(`[index] save failed: ${err.message}`));
+    }, SAVE_DEBOUNCE_MS);
+  }
+
+  /** Writes the current index now, without waiting for the debounce (used on shutdown) */
+  async flush() {
+    if (!this.saveTimer) return;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    await this.writeFile();
+  }
+
+  async writeFile() {
+    const body = JSON.stringify({ address: this.address, fromBlock: this.fromBlock, head: this.head, logs: this.logs });
     const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ address: this.address, fromBlock: this.fromBlock, head: this.head, logs: this.logs }));
-    fs.renameSync(tmp, this.file);
+    await fsp.mkdir(path.dirname(this.file), { recursive: true });
+    await fsp.writeFile(tmp, body);
+    await fsp.rename(tmp, this.file);
   }
 
   start() {
@@ -163,6 +192,12 @@ export class EventIndex {
   async catchUp() {
     const latest = await this.provider.getBlockNumber();
     this.status.latest = latest;
+    const startHead = this.head;
+    const totalBlocks = latest - startHead;
+    if (totalBlocks > CHUNK * 10) {
+      this.log.log(`[index] catching up ${totalBlocks} blocks (${this.head} -> ${latest}); this can take a while on a fresh index`);
+    }
+    let lastLog = Date.now();
     while (this.head < latest) {
       const ranges = [];
       for (let a = this.head + 1; a <= latest && ranges.length < CONCURRENCY * 4; a += CHUNK) {
@@ -193,7 +228,13 @@ export class EventIndex {
       this.head = ranges[ranges.length - 1][1];
       this.push(added);
       if (added.length || this.head - before >= CHUNK * 10) this.save();
+      if (this.head < latest && Date.now() - lastLog >= PROGRESS_LOG_MS) {
+        lastLog = Date.now();
+        const pct = totalBlocks > 0 ? Math.round(((this.head - startHead) / totalBlocks) * 100) : 100;
+        this.log.log(`[index] catching up: block ${this.head} / ${latest} (${pct}%, ${this.logs.length} events indexed so far)`);
+      }
     }
+    if (totalBlocks > CHUNK * 10) this.log.log(`[index] caught up to block ${latest}`);
   }
 
   /** Events after `block` (oldest first), and the block the index has reached */

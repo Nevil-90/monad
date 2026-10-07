@@ -13,7 +13,9 @@
 import { ethers } from 'ethers';
 
 const MAX_RETRIES = 6;
-const MAX_PER_SECOND = 6;
+// Kept below the RPC's real 15/sec cap for headroom (tested sustained at this rate with zero 429s;
+// a relay catching up a long event-log backfill is the main thing that benefits from this being high)
+const MAX_PER_SECOND = 10;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function isRateLimited(err) {

@@ -128,3 +128,12 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => console.log(`[relay] listening on http://localhost:${PORT}`));
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    if (events) {
+      try { await events.flush(); } catch (err) { console.error(`[relay] flush on shutdown failed: ${err.message}`); }
+    }
+    process.exit(0);
+  });
+}
