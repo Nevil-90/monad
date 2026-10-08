@@ -1,6 +1,6 @@
 # Ideas for Monad Metropolis
 
-MonadPulse already covers the core loop well: instant vault-backed bets, moving odds, a streak
+Pulse already covers the core loop well: instant vault-backed bets, moving odds, a streak
 jackpot, and a fully verifiable dashboard. These are additions that would make the submission stand
 out further for judges, grouped by what they mainly help with. Not a roadmap — a menu to pick from.
 

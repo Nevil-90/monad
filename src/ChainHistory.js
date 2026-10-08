@@ -73,12 +73,6 @@ export class ChainHistory {
     return () => this.gasListeners.delete(fn);
   }
 
-  hasOlder() {
-    return false; // the relay serves the complete history since deployment
-  }
-
-  async loadOlder() {}
-
   marketLabel(marketId) {
     const m = this.markets.get(String(marketId).toLowerCase());
     return m ? m.symbol : `${String(marketId).slice(0, 10)}…`;

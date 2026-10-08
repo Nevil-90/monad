@@ -2,6 +2,12 @@
  * Dashboard.js
  * Transparency view: every bet, win, jackpot, cash-out and vault deposit on the house contract.
  * Everything is derived from ChainHistory (contract events) and links to the explorer.
+ *
+ * Rows and totals are fetched a page at a time from the relay's /dashboard/* endpoints (backed by
+ * Supabase, scripts/lib/dashboard_store.js), filtered/sorted/paginated in SQL: the browser only ever
+ * downloads the one page it is showing, never the full history. This is separate from `history`
+ * (ChainHistory), which keeps streaming the live Trade view unaffected; the Dashboard still reaches
+ * into it for small live lookups (the connected wallet, a pending bet's live strike price).
  */
 
 const PAGE_SIZE = 25;
@@ -20,7 +26,6 @@ const ACTIVITY = {
   lpIn: { label: 'Vault deposit', cls: 'market', in: true },
   lpOut: { label: 'Vault withdrawal', cls: 'market' }
 };
-const LP_TYPES = new Set(['lpIn', 'lpOut']);
 const STATUS_LABEL = { Pending: 'Running', Won: 'Won', Lost: 'Lost', Push: 'Tie · stake back', Void: 'No price · stake back' };
 
 export class Dashboard {
@@ -36,6 +41,8 @@ export class Dashboard {
     this.sort = { key: 'staked', dir: -1 };
     this.visible = false;
     this.renderQueued = false;
+    this.tableReq = 0;   // discards a stale /dashboard/{activity,bets,wallets} response
+    this.statsReq = 0;   // discards a stale /dashboard/summary response
 
     this.el = (id) => document.getElementById(id);
     this.bind();
@@ -53,9 +60,13 @@ export class Dashboard {
       this.render();
     }));
     this.el('dash-search').addEventListener('input', (e) => {
-      this.query = e.target.value.trim().toLowerCase();
-      this.page = 0;
-      this.render();
+      const value = e.target.value.trim().toLowerCase();
+      clearTimeout(this.searchDebounce);
+      this.searchDebounce = setTimeout(() => {
+        this.query = value;
+        this.page = 0;
+        this.render();
+      }, 250);
     });
     // Shortcut: filter everything to the connected wallet (toggles off when pressed again)
     this.el('dash-mine').addEventListener('click', () => {
@@ -70,7 +81,6 @@ export class Dashboard {
     this.el('dash-type').addEventListener('change', (e) => { this.type = e.target.value; this.page = 0; this.render(); });
     this.el('dash-prev').addEventListener('click', () => { this.page = Math.max(0, this.page - 1); this.render(); });
     this.el('dash-next').addEventListener('click', () => { this.page += 1; this.render(); });
-    this.el('dash-older').addEventListener('click', () => this.history.loadOlder());
 
     this.el('dash-table').addEventListener('click', (e) => {
       const wallet = e.target.closest('[data-wallet]');
@@ -114,6 +124,16 @@ export class Dashboard {
   }
 
   // ---------------------------------------------------------------------------
+  // Fetching (paginated/filtered in SQL; the browser never holds the full history)
+  // ---------------------------------------------------------------------------
+
+  async fetchJson(path, params) {
+    const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+    const res = await fetch(`${this.history.relayUrl}${path}?${qs}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `relay returned ${res.status}`);
+    return body;
+  }
 
   render() {
     const me = (this.getAccount() || '').toLowerCase();
@@ -124,46 +144,10 @@ export class Dashboard {
     mine.setAttribute('aria-pressed', String(Boolean(me) && this.query === me));
     if (!this.visible) return;
     this.renderHeader();
-    this.renderStats();
     this.renderMarketOptions();
     this.el('dash-type').classList.toggle('hidden', this.tab !== 'activity');
-
-    const rows = this.tab === 'activity' ? this.activityRows()
-      : this.tab === 'wallets' ? this.walletRows()
-        : this.betRows();
-    const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-    this.page = Math.min(this.page, pages - 1);
-    const slice = rows.slice(this.page * PAGE_SIZE, (this.page + 1) * PAGE_SIZE);
-
-    const table = this.el('dash-table');
-    if (!rows.length) {
-      table.innerHTML = `<div class="empty">${this.emptyText()}</div>`;
-    } else if (this.tab === 'activity') {
-      table.innerHTML = this.activityTable(slice);
-    } else if (this.tab === 'wallets') {
-      table.innerHTML = this.walletTable(slice);
-    } else {
-      table.innerHTML = this.betTable(slice);
-    }
-
-    const from = rows.length ? this.page * PAGE_SIZE + 1 : 0;
-    const to = Math.min(rows.length, (this.page + 1) * PAGE_SIZE);
-    const noun = this.tab === 'activity' ? 'events' : this.tab === 'wallets' ? 'wallets' : 'bets';
-    this.el('dash-count').textContent = rows.length ? `${fmtInt(from)}–${fmtInt(to)} of ${fmtInt(rows.length)} ${noun}` : `0 ${noun}`;
-    this.el('dash-page').textContent = `${this.page + 1} / ${pages}`;
-    this.el('dash-prev').disabled = this.page === 0;
-    this.el('dash-next').disabled = this.page >= pages - 1;
-
-    const h = this.history;
-    const olderBtn = this.el('dash-older');
-    olderBtn.classList.toggle('hidden', !h.hasOlder());
-    olderBtn.disabled = Boolean(h.loadingOlder);
-    olderBtn.textContent = h.loadingOlder ? 'Loading…' : 'Load older history';
-    this.el('dash-range').textContent = h.oldest !== null
-      ? `Loaded blocks ${fmtInt(h.oldest)} – ${fmtInt(h.newest)}${h.hasOlder() ? '' : ' · complete history since deployment'}`
-      : '';
-
-    this.fillBlockTimes();
+    this.fetchAndRenderStats();
+    this.fetchAndRenderTable();
   }
 
   renderHeader() {
@@ -183,17 +167,22 @@ export class Dashboard {
     if (h.address) link.href = `${this.explorer}/address/${h.address}`;
   }
 
-  renderStats() {
-    const h = this.history;
-    const s = h.summary();
-    const house = h.house;
+  async fetchAndRenderStats() {
+    const myReq = ++this.statsReq;
+    const house = this.history.house;
     const mon = (v) => Number(v) / 1e18;
     this.el('ds-paid').textContent = house ? `${fmtMon(mon(house.totalPaidOut))} MON` : '—';
     this.el('ds-volume').textContent = house ? `${fmtMon(mon(house.totalWagered))} MON` : '—';
-    // Counts are all-time once the full history is loaded; until then they would undercount
-    const complete = h.status === 'live';
-    this.el('ds-wallets').textContent = complete ? fmtInt(s.walletCount) : '—';
-    this.el('ds-bets').textContent = complete ? fmtInt(s.betsCount) : '—';
+    let s;
+    try {
+      s = await this.fetchJson('/dashboard/summary', { market: this.market });
+    } catch (_) {
+      return; // leave the previous numbers up rather than blank them on a transient relay hiccup
+    }
+    if (myReq !== this.statsReq || !this.visible) return;
+
+    this.el('ds-wallets').textContent = fmtInt(s.walletCount);
+    this.el('ds-bets').textContent = fmtInt(s.betsCount);
 
     // Money flow: what players staked and what the house paid them (credited to their in-game balance)
     const inTotal = s.riseIn + s.fallIn;
@@ -223,53 +212,62 @@ export class Dashboard {
     select.value = this.market;
   }
 
+  async fetchAndRenderTable() {
+    const myReq = ++this.tableReq;
+    const path = this.tab === 'activity' ? '/dashboard/activity' : this.tab === 'wallets' ? '/dashboard/wallets' : '/dashboard/bets';
+    const params = { market: this.market, q: this.query || undefined, page: this.page, pageSize: PAGE_SIZE };
+    if (this.tab === 'activity') params.type = this.type;
+    else if (this.tab === 'wallets') { params.sort = this.sort.key; params.dir = this.sort.dir; }
+
+    let result;
+    try {
+      result = await this.fetchJson(path, params);
+    } catch (err) {
+      if (myReq !== this.tableReq || !this.visible) return;
+      this.el('dash-table').innerHTML = `<div class="empty">${escapeHtml(err.message || 'Could not reach the relay.')}</div>`;
+      this.el('dash-count').textContent = '';
+      this.el('dash-page').textContent = '1 / 1';
+      this.el('dash-prev').disabled = true;
+      this.el('dash-next').disabled = true;
+      return;
+    }
+    if (myReq !== this.tableReq || !this.visible) return;
+
+    const { rows, total } = result;
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (this.page > pages - 1) {
+      this.page = pages - 1;
+      return this.fetchAndRenderTable();
+    }
+
+    const table = this.el('dash-table');
+    if (!rows.length) {
+      table.innerHTML = `<div class="empty">${this.emptyText()}</div>`;
+    } else if (this.tab === 'activity') {
+      table.innerHTML = this.activityTable(rows);
+    } else if (this.tab === 'wallets') {
+      table.innerHTML = this.walletTable(rows);
+    } else {
+      table.innerHTML = this.betTable(rows);
+    }
+
+    const from = total ? this.page * PAGE_SIZE + 1 : 0;
+    const to = Math.min(total, (this.page + 1) * PAGE_SIZE);
+    const noun = this.tab === 'activity' ? 'events' : this.tab === 'wallets' ? 'wallets' : 'bets';
+    this.el('dash-count').textContent = total ? `${fmtInt(from)}–${fmtInt(to)} of ${fmtInt(total)} ${noun}` : `0 ${noun}`;
+    this.el('dash-page').textContent = `${this.page + 1} / ${pages}`;
+    this.el('dash-prev').disabled = this.page === 0;
+    this.el('dash-next').disabled = this.page >= pages - 1;
+
+    this.fillBlockTimes();
+  }
+
   emptyText() {
     const h = this.history;
     if (h.status === 'syncing' || h.status === 'idle') return 'Reading contract events…';
     if (h.status === 'error') return escapeHtml(h.error || 'Could not reach the network.');
     if (this.query) return 'Nothing matches that search.';
-    return h.hasOlder() ? 'No activity in these blocks yet. Load older history to look further back.' : 'No activity on this contract yet.';
-  }
-
-  // ---------------------------------------------------------------------------
-  // Rows
-  // ---------------------------------------------------------------------------
-
-  matchesQuery(rec) {
-    const q = this.query;
-    if (!q) return true;
-    if (/^0x[0-9a-f]{64}$/.test(q)) return rec.tx.toLowerCase() === q;
-    return (rec.user || '').toLowerCase().includes(q) || rec.tx.toLowerCase().startsWith(q);
-  }
-
-  activityRows() {
-    return this.history.records.filter((r) => {
-      if (this.market !== 'all' && r.marketId !== this.market) return false;
-      if (this.type !== 'all') {
-        if (this.type === 'lp' ? !LP_TYPES.has(r.type) : r.type !== this.type) return false;
-      }
-      return this.matchesQuery(r);
-    });
-  }
-
-  walletRows() {
-    let rows = this.history.wallets();
-    if (this.market !== 'all') {
-      // Recompute for one market from its records
-      const ids = new Set(this.history.records.filter((r) => r.marketId === this.market && r.user).map((r) => r.user.toLowerCase()));
-      rows = rows.filter((w) => ids.has(w.address.toLowerCase()));
-    }
-    if (this.query) rows = rows.filter((w) => w.address.toLowerCase().includes(this.query));
-    const { key, dir } = this.sort;
-    const val = (w) => (key === 'winrate' ? (w.wins + w.losses ? w.wins / (w.wins + w.losses) : -1) : key === 'out' ? w.won + w.refunded + w.jackpots : w[key]);
-    return rows.sort((a, b) => (val(a) - val(b)) * dir);
-  }
-
-  betRows() {
-    let rows = this.history.betsList();
-    if (this.market !== 'all') rows = rows.filter((b) => b.marketId === this.market);
-    if (this.query) rows = rows.filter((b) => (b.tx || '').toLowerCase().startsWith(this.query) || (b.settleTx || '').toLowerCase().startsWith(this.query) || (b.user || '').toLowerCase().includes(this.query));
-    return rows;
+    return 'No activity on this contract yet.';
   }
 
   // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# MonadPulse
+# Pulse
 
 **Rise or Fall** on BTC, ETH, SOL and MON, fully on-chain on Monad. Bet any time; the house takes the
 other side of every bet, so nothing waits for another player and nothing is refunded for lack of one.

@@ -14,11 +14,11 @@ import '@fontsource/jetbrains-mono/latin-700.css';
 import '../style.css';
 
 export const metadata = {
-  title: 'MonadPulse · Rise or Fall',
+  title: 'Pulse · Rise or Fall',
   description: 'Predict whether a price closes above or below the strike. Pari-mutuel rounds on Monad, settled with RedStone oracle prices.',
   manifest: '/manifest.webmanifest',
   icons: { icon: '/icon.svg', apple: '/apple-touch-icon.png' },
-  appleWebApp: { capable: true, title: 'MonadPulse', statusBarStyle: 'black-translucent' }
+  appleWebApp: { capable: true, title: 'Pulse', statusBarStyle: 'black-translucent' }
 };
 
 export const viewport = {

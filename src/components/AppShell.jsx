@@ -25,7 +25,7 @@ export default function AppShell() {
             <span className="boot-reflect"></span>
           </div>
           <div className="boot-stage">
-            <div className="boot-brand">MonadPulse</div>
+            <div className="boot-brand">Pulse</div>
             <div className="boot-tag">Rise or fall · 30 seconds · on Monad</div>
             <ul className="boot-steps">
               <li data-boot="network"><span className="boot-check" aria-hidden="true"></span>Connecting to Monad</li>
@@ -39,12 +39,12 @@ export default function AppShell() {
           {/* Top bar */}
           <header className="topbar">
             <div className="brand-group">
-            <a className="brand" href="/" aria-label="MonadPulse home">
+            <a className="brand" href="/" aria-label="Pulse home">
               <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
                 <circle cx="16" cy="12" r="4.5" />
                 <rect x="5" y="19" width="22" height="2" rx="1" />
               </svg>
-              <span className="brand-word">MonadPulse</span>
+              <span className="brand-word">Pulse</span>
             </a>
             <nav className="views" aria-label="Views">
               <button className="view-btn active" data-view="trade" aria-pressed="true">Trade</button>
@@ -230,7 +230,7 @@ export default function AppShell() {
             <header className="dash-head">
               <div>
                 <h1 className="dash-title">Every MON, on the record</h1>
-                <p className="dash-sub">Every row is an event emitted by the house contract on Monad, indexed by the MonadPulse relay. Each one links to its transaction on the Monad explorer, so anyone can check it, and the totals are read from the contract itself.</p>
+                <p className="dash-sub">Every row is an event emitted by the house contract on Monad, indexed by the Pulse relay. Each one links to its transaction on the Monad explorer, so anyone can check it, and the totals are read from the contract itself.</p>
               </div>
               <div className="dash-source">
                 <div className="dash-sync"><span className="sync-dot" id="dash-sync-dot"></span><span id="dash-sync">Connecting…</span></div>
@@ -290,10 +290,6 @@ export default function AppShell() {
                   <button className="icon-btn" id="dash-next" aria-label="Next page">→</button>
                 </div>
               </footer>
-              <div className="dash-older">
-                <span className="dash-range num" id="dash-range">—</span>
-                <button className="ghost-btn" id="dash-older">Load older history</button>
-              </div>
             </section>
           </div>
         </main>

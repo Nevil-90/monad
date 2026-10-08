@@ -1,6 +1,6 @@
 {
-  "name": "MonadPulse",
-  "short_name": "MonadPulse",
+  "name": "Pulse",
+  "short_name": "Pulse",
   "description": "Rise or Fall: one-minute prediction rounds on Monad, settled with Pyth prices.",
   "start_url": "/",
   "scope": "/",

@@ -1,5 +1,5 @@
 /**
- * Service worker: makes MonadPulse installable and lets the app shell open without a connection.
+ * Service worker: makes Pulse installable and lets the app shell open without a connection.
  * Pages are network-first (a new deploy is picked up on the next visit); hashed build assets are
  * cache-first (their names change on every build). Prices, RPC and the relay are never cached:
  * they are cross-origin and always go to the network.
