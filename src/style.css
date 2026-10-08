@@ -213,6 +213,8 @@ button:disabled { cursor: not-allowed; }
   background: rgba(131, 110, 249, 0.14);
   border: 1px solid rgba(131, 110, 249, 0.5);
   transition: background 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .wallet-btn:hover { background: rgba(131, 110, 249, 0.24); }
 .wallet-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }

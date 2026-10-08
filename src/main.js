@@ -199,7 +199,6 @@ export function startApp() {
     }
   });
 
-
   // Wallet balance on Monad; null until a wallet is connected and read
   function currentBalance() {
     const b = parseFloat(web3.balance);
@@ -1159,6 +1158,8 @@ export function startApp() {
     if (!res.success) return toast(res.cancelled ? 'Deposit cancelled' : 'Deposit failed', res.cancelled ? 'Nothing was sent.' : res.error, { error: !res.cancelled });
     toast('Added to the vault', `${fmtMon(amount)} MON`, { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
     $('lp-amount').value = '';
+    house.readPlayer(); // refreshes the vault share shown in the LP panel
+    setTimeout(() => web3.fetchBalance(), 2000);
   });
   $('lp-remove').addEventListener('click', async () => {
     const shares = house?.player?.shares ?? 0n;
@@ -1166,6 +1167,8 @@ export function startApp() {
     const res = await web3.removeLiquidity(shares);
     if (!res.success) return toast(res.cancelled ? 'Withdrawal cancelled' : 'Withdrawal failed', res.cancelled ? 'Your share stays in the vault.' : res.error, { error: !res.cancelled });
     toast('Withdrawn from the vault', 'Your share is on its way to your wallet', { link: `${getConfig().explorerUrl}/tx/${res.txHash}` });
+    house.readPlayer(); // refreshes the vault share (back to zero) shown in the LP panel
+    setTimeout(() => web3.fetchBalance(), 2000);
   });
   $('stake-clear').addEventListener('click', () => {
     el.stake.value = 0;

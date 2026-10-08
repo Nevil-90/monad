@@ -21,7 +21,17 @@ import { MonadRpcProvider } from './rpc.js';
 // transactions from the same wallet key (another script or process active on it at the same time) can
 // leave the node's balance/nonce view briefly inconsistent. Not proven beyond that, but MIN_GAS_LIMIT
 // is kept as a cheap defensive buffer regardless, applied everywhere a gas limit is computed here.
+// Confirmed again live (a cash-out, value 0, rejected this way on a 5+ MON wallet - not genuinely out
+// of funds): retried automatically below instead of just documented, since it clears on its own.
 const MIN_GAS_LIMIT = 200_000n;
+const SPURIOUS_BALANCE_RETRIES = 3;
+const SPURIOUS_BALANCE_RETRY_DELAY_MS = 700;
+
+function isSpuriousInsufficientBalance(err) {
+  const msg = [err?.message, err?.shortMessage, err?.data?.message, err?.error?.message].filter(Boolean).join(' ');
+  return /insufficient balance/i.test(msg);
+}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const MONAD_NETWORKS = {
   get testnet() {
@@ -141,6 +151,20 @@ export class Web3Manager {
 
   getActiveNetworkConfig() {
     return MONAD_NETWORKS[this.currentEnvKey];
+  }
+
+  /** `this.provider.request()`, retried a few times on the spurious "insufficient balance" rejection
+   *  above (see MIN_GAS_LIMIT comment) - everything else (a real rejection, a genuine balance
+   *  shortfall, a user cancel) is thrown immediately, unchanged. */
+  async walletRequest(payload) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.provider.request(payload);
+      } catch (err) {
+        if (!isSpuriousInsufficientBalance(err) || attempt >= SPURIOUS_BALANCE_RETRIES || this.isUserRejection(err)) throw err;
+        await sleep(SPURIOUS_BALANCE_RETRY_DELAY_MS);
+      }
+    }
   }
 
   isWalletInstalled() {
@@ -385,7 +409,7 @@ export class Web3Manager {
     // sign a transaction that cannot succeed
     let estHex;
     try {
-      estHex = await this.provider.request({
+      estHex = await this.walletRequest({
         method: 'eth_estimateGas',
         params: [txParams]
       });
@@ -463,7 +487,7 @@ export class Web3Manager {
       };
       txParams.gas = await this.estimateGasWithBuffer(txParams);
       onPending?.();
-      const txHash = await this.provider.request({ method: 'eth_sendTransaction', params: [txParams] });
+      const txHash = await this.walletRequest({ method: 'eth_sendTransaction', params: [txParams] });
       return { success: true, txHash };
     } catch (err) {
       const error = this.txError(err);

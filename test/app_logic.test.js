@@ -17,7 +17,7 @@ import { HouseState } from '../src/HouseState.js';
 import { ChainHistory } from '../src/ChainHistory.js';
 import { HOUSE_ABI } from '../src/contracts/HouseAbi.js';
 import { CircuitBreaker } from '../src/CircuitBreaker.js';
-import { isRateLimited } from '../src/rpc.js';
+import { isRateLimited, isSpuriousInsufficientBalance } from '../src/rpc.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let passed = 0;
@@ -142,5 +142,7 @@ console.log('\n--- RPC throttling ---');
 check(isRateLimited({ info: { error: { code: -32011, message: 'requests limited to 15/sec' } } }), 'Recognises Monad\'s 15/sec limit response');
 check(isRateLimited({ message: 'server response 429 Too Many Requests' }), 'Recognises HTTP 429');
 check(!isRateLimited({ shortMessage: 'execution reverted: "Betting window closed"' }), 'A real revert is not treated as throttling');
+check(isSpuriousInsufficientBalance({ message: 'RPC \'0x279f\' Custom eth_sendRawTransaction: Signer had insufficient balance' }), 'Recognises the spurious "Signer had insufficient balance" rejection, retried instead of shown as a real shortfall');
+check(!isSpuriousInsufficientBalance({ shortMessage: 'execution reverted: "Betting window closed"' }), 'A real revert is not mistaken for the spurious balance error');
 
 console.log(`\nAPP LOGIC VERDICT: ${passed}/${total} checks passed`);

@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "ganache": "^7.9.2",
+    "playwright": "^1.64.0",
     "solc": "^0.8.24"
   },
   "dependencies": {

@@ -391,7 +391,6 @@ export default function AppShell() {
           </div>
         </div>
 
-        
         {/* Toast */}
         <div className="toast hidden" id="toast" role="status" aria-live="polite">
           <div className="toast-body">

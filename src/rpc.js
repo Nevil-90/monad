@@ -30,6 +30,16 @@ export function isTransientNetworkError(err) {
   return parts.some((p) => p !== undefined && /request timeout|network (error|timeout)|socket hang up|ECONNRESET/i.test(String(p)));
 }
 
+// Seen rejecting eth_sendTransaction/eth_estimateGas on well-funded wallets on Monad testnet; retesting
+// the identical call later succeeds, so it isn't a real balance shortfall. Best evidence (see
+// house_keeper.js and Web3Manager.js, where this is also retried): overlapping transactions from the
+// same key can leave the node's balance/nonce view briefly inconsistent. Harmless to check on every
+// method - the text only ever appears on a tx-sending call, never a read.
+export function isSpuriousInsufficientBalance(err) {
+  const parts = [err?.message, err?.shortMessage, err?.data?.message, err?.error?.message];
+  return parts.some((p) => p !== undefined && /insufficient balance/i.test(String(p)));
+}
+
 export class MonadRpcProvider extends ethers.JsonRpcProvider {
   constructor(url, chainId) {
     // One request per HTTP call so a throttled response maps to exactly one retried request
@@ -79,7 +89,7 @@ export class MonadRpcProvider extends ethers.JsonRpcProvider {
       try {
         return await super.send(method, params);
       } catch (err) {
-        if (!(isRateLimited(err) || isTransientNetworkError(err)) || attempt >= MAX_RETRIES) throw err;
+        if (!(isRateLimited(err) || isTransientNetworkError(err) || isSpuriousInsufficientBalance(err)) || attempt >= MAX_RETRIES) throw err;
         await sleep(150 * 2 ** attempt + Math.random() * 150);
       }
     }
