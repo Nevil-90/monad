@@ -2,7 +2,7 @@
 # settles rounds). Run from the repository root:
 #   docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 # Needs in .env: NEXT_PUBLIC_CONTRACT_ADDRESS, NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK, NEXT_PUBLIC_CHAIN_ID
-# (143 for mainnet), KEEPER_PRIVATE_KEY, ALLOWED_ORIGIN (the app's https origin).
+# (143 for mainnet), KEEPER_PRIVATE_KEY, ALLOWED_ORIGINS (the app's https origin(s), comma-separated).
 # Put the relay behind HTTPS (a reverse proxy or your platform's load balancer); browsers on an
 # https site cannot use an http relay.
 services:
@@ -14,7 +14,9 @@ services:
       NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK: ${NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK}
       NEXT_PUBLIC_CHAIN_ID: ${NEXT_PUBLIC_CHAIN_ID:-10143}
       NEXT_PUBLIC_RPC_URL: ${NEXT_PUBLIC_RPC_URL:-}
-      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:?set ALLOWED_ORIGIN to the app's origin}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?set ALLOWED_ORIGINS to the app's origin(s), comma-separated}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
       PORT: 8787
     ports: ["8787:8787"]
     volumes: [relay-data:/app/data]

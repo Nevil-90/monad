@@ -103,7 +103,7 @@ simulated players and a settler, and prints the `NEXT_PUBLIC_*` values to run th
 | `NEXT_PUBLIC_CHAIN_ID` | `10143` | `143` runs the app on Monad mainnet (RPC and explorer follow) |
 | `NEXT_PUBLIC_RPC_URL` | the chain's public RPC | Another RPC, e.g. a paid one without the 15 requests/s limit, or the local chain |
 | `NEXT_PUBLIC_EXPLORER_URL` | the chain's explorer | Explorer used for transaction links |
-| `PORT`, `ALLOWED_ORIGIN` | `8787`, `*` | Relay port and the site allowed to read it; `ALLOWED_ORIGIN` is required when `NODE_ENV=production` |
+| `PORT`, `ALLOWED_ORIGINS` | `8787`, `*` | Relay port and the comma-separated site origins allowed to read it (`https://*.vercel.app` wildcards work); `ALLOWED_ORIGINS` is required when `NODE_ENV=production` (`ALLOWED_ORIGIN` still works) |
 | `KEEPER_HEALTH_PORT` | off | Keeper serves `GET /health` (stream status, pending bets, gas spent) |
 
 ## Deploy
@@ -125,12 +125,24 @@ The seed sets the table limit: the largest win is 2% of the free vault, so 25 MO
 ~0.55 MON at even odds. The minimum bet is set at deploy from the chain's gas estimate of a real bet, so the
 network fee stays under 5% of the smallest bet.
 
-### Production checklist
+### Testnet on Vercel with the relay behind a Cloudflare Tunnel
+
+1. Run the relay on your machine: `npm run relay`, with `ALLOWED_ORIGINS` in `.env` set to your Vercel URL(s)
+   (comma-separated; `https://*.vercel.app` also allows preview deployments). Run the keeper too (`npm run keeper`).
+2. Point a Cloudflare Tunnel at `http://localhost:8787` and use a named tunnel on your own domain. The relay
+   streams events over Server-Sent Events, and quick `trycloudflare.com` tunnels do not support SSE.
+3. In Vercel's environment variables set `NEXT_PUBLIC_PRICE_RELAY_URL` (the tunnel's https URL),
+   `NEXT_PUBLIC_CHAIN_ID=10143`, `NEXT_PUBLIC_CONTRACT_ADDRESS`, `NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK` and
+   `NEXT_PUBLIC_PRICE_SOURCE=coinbase`, then redeploy (these are baked in at build time). Never put private
+   keys or Supabase keys in Vercel.
+4. Check `https://<tunnel-url>/health`; the relay's startup log shows the network and the allowed origins.
+
+### Production checklist (mainnet)
 
 1. **Mainnet config:** `NEXT_PUBLIC_CHAIN_ID=143` and a dedicated RPC (`NEXT_PUBLIC_RPC_URL`); the public
    one allows 15 requests/s per IP, shared by the relay and keeper.
 2. **Services:** `docker compose -f deploy/docker-compose.yml --env-file .env up -d --build` runs the relay
-   and keeper with restarts and health checks. Put the relay behind HTTPS and set `ALLOWED_ORIGIN`.
+   and keeper with restarts and health checks. Put the relay behind HTTPS and set `ALLOWED_ORIGINS`.
 3. **Owner:** create a Safe (2 of 3 or more) and run `npm run transfer-owner -- 0xSAFE`; the Safe then
    approves `acceptOwnership()`.
 4. **Vault:** size it for the bets you want to take; the max bet scales with it. The keeper pays the gas

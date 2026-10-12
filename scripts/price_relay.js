@@ -26,7 +26,8 @@
  * in-memory log array, unchanged, for the live Trade view.
  *
  * Usage:  npm run relay        (then NEXT_PUBLIC_PRICE_RELAY_URL=http://localhost:8787 for the app)
- * Env:    PORT (8787), ALLOWED_ORIGIN (required in production: your site's origin, e.g. https://app.example),
+ * Env:    PORT (8787), ALLOWED_ORIGINS (comma-separated site origins allowed by CORS, e.g.
+ *         https://app.vercel.app,https://*.vercel.app; "*" allows any; required in production),
  *         SUPABASE_URL, SUPABASE_SERVICE_KEY (see .env.example and supabase/schema.sql)
  */
 
@@ -41,11 +42,30 @@ import * as dashboardStore from './lib/dashboard_store.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const production = process.env.NODE_ENV === 'production';
-if (production && !process.env.ALLOWED_ORIGIN) {
-  console.error('[relay] ALLOWED_ORIGIN must be set in production (the app\'s origin), not left open to every site.');
+// Comma-separated list of origins allowed by CORS. ALLOWED_ORIGIN (singular) is still read as a fallback.
+// A leading "*." matches any subdomain (https://*.vercel.app). Unset means open ("*"), outside production only.
+const ORIGINS = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || '')
+  .split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+if (production && !ORIGINS.length) {
+  console.error('[relay] ALLOWED_ORIGINS must be set in production (the site origin(s), comma-separated), not left open to every site.');
   process.exit(1);
 }
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
+const ALLOW_ANY_ORIGIN = ORIGINS.includes('*') || !ORIGINS.length;
+const wildcardOrigins = ORIGINS.filter((o) => o.includes('*.')).map((o) => {
+  const [scheme, host] = o.split('://');
+  return { scheme, suffix: host.slice(host.indexOf('*.') + 1) };
+});
+function allowedOrigin(origin) {
+  if (ALLOW_ANY_ORIGIN) return '*';
+  if (!origin) return null;
+  if (ORIGINS.includes(origin)) return origin;
+  try {
+    const u = new URL(origin);
+    const scheme = u.protocol.slice(0, -1);
+    if (wildcardOrigins.some((w) => w.scheme === scheme && u.host.endsWith(w.suffix))) return origin;
+  } catch { /* malformed Origin header: not allowed */ }
+  return null;
+}
 const HEARTBEAT_MS = 15000; // keeps idle SSE connections open through proxies; carries no data
 
 const feeds = Object.values(SUPPORTED_MARKETS).map((m) => m.feed);
@@ -76,7 +96,9 @@ function send(res, code, body) {
 }
 
 const server = http.createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+  const allowed = allowedOrigin(req.headers.origin);
+  if (allowed) res.setHeader('Access-Control-Allow-Origin', allowed);
+  if (!ALLOW_ANY_ORIGIN) res.setHeader('Vary', 'Origin');
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   if (req.method !== 'GET') {
@@ -154,7 +176,7 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 
-server.listen(PORT, () => console.log(`[relay] listening on http://localhost:${PORT}`));
+server.listen(PORT, () => console.log(`[relay] listening on http://localhost:${PORT} | ${net.name} (chain ${net.chainId}) | CORS: ${ALLOW_ANY_ORIGIN ? 'any origin' : ORIGINS.join(', ')}`));
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {

@@ -136,20 +136,21 @@ export function startApp() {
   // Toast
   // ---------------------------------------------------------------------------
   let toastTimer = null;
-  function toast(title, msg, { link = null, error = false, sticky = false } = {}) {
+  function toast(title, msg, { link = null, linkLabel = 'View ↗', error = false, sticky = false } = {}) {
     clearTimeout(toastTimer);
     el.toast.classList.remove('hidden');
     el.toast.classList.toggle('error', error);
     el.toastTitle.textContent = title;
     el.toastMsg.textContent = msg.length > 160 ? `${msg.slice(0, 157)}…` : msg;
     el.toastLink.classList.toggle('hidden', !link);
-    if (link) el.toastLink.href = link;
+    if (link) { el.toastLink.href = link; el.toastLink.textContent = linkLabel; }
     if (!sticky) toastTimer = setTimeout(() => el.toast.classList.add('hidden'), 5000);
   }
 
   // ---------------------------------------------------------------------------
   // Wallet
   // ---------------------------------------------------------------------------
+  let faucetHinted = false;
   const web3 = new Web3Manager({
     connected: ({ account, balance, wallet, networkError, silent }) => {
       el.walletLabel.textContent = shortAddr(account);
@@ -165,6 +166,11 @@ export function startApp() {
     },
     balanceUpdated: (balance) => {
       el.balance.textContent = balance ?? '—';
+      // An empty wallet on testnet: point at the faucet once per page load
+      if (!faucetHinted && balance !== null && balance !== undefined && Number(balance) === 0 && getConfig().faucetUrl) {
+        faucetHinted = true;
+        toast('No test MON yet', 'This wallet is empty. Get free testnet MON from the faucet to place a bet.', { link: getConfig().faucetUrl, linkLabel: 'Faucet ↗' });
+      }
       paintOdds();
     },
     txPending: ({ side, amount }) => {
@@ -299,6 +305,7 @@ export function startApp() {
       <div class="modal-kv"><span>Network</span><span>${escapeHtml(cfg.name)}</span></div>
       <div class="modal-kv"><span>Balance</span><span class="num">${escapeHtml(web3.balance ?? '—')} MON</span></div>
       <div class="modal-actions">
+        ${cfg.faucetUrl ? `<a class="ghost-btn" href="${escapeHtml(cfg.faucetUrl)}" target="_blank" rel="noopener">Get test MON ↗</a>` : ''}
         <a class="ghost-btn" href="${escapeHtml(`${cfg.explorerUrl}/address/${web3.account}`)}" target="_blank" rel="noopener">Explorer ↗</a>
         <button class="solid-btn" id="wallet-disconnect">Disconnect</button>
       </div>`;
@@ -949,12 +956,22 @@ export function startApp() {
         : `${sideName(bet.side)} lost ${fmtMon(bet.stake)} MON`;
     }
     el.resultState.textContent = 'Settled on-chain';
+    if (won) {
+      const text = `I just won ${fmtMon(bet.paid)} MON on a ${bet.duration || ''}${bet.duration ? 's ' : ''}${sideName(bet.side)} call on Pulse, fully on-chain on Monad. Try it:`;
+      const a = document.createElement('a');
+      a.className = 'result-share';
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = ' · Share ↗';
+      a.href = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(location.origin)}`;
+      el.resultState.appendChild(a);
+    }
     el.resultState.className = 'result-state';
     el.result.className = `result ${kind}`;
     void el.result.offsetWidth;
     el.result.classList.remove('hidden');
     clearTimeout(resultTimer);
-    resultTimer = setTimeout(() => el.result.classList.add('hidden'), 3200);
+    resultTimer = setTimeout(() => el.result.classList.add('hidden'), won ? 6000 : 3200);
     if (bet.marketId === activeMarketId()?.toLowerCase()) {
       engine.flashSettlement(bet.endPrice > bet.startPrice ? 'UP' : bet.endPrice < bet.startPrice ? 'DOWN' : 'DRAW');
       engine.celebrate(won ? bet.side : 'DRAW', won ? 1.4 : 0.3);

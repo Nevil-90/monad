@@ -349,6 +349,8 @@ button:disabled { cursor: not-allowed; }
 .result.down .result-title { color: var(--tide-hi); }
 .result.neutral .result-title { color: var(--horizon); }
 .result-state { margin-top: 6px; font-family: var(--font-num); font-size: 11px; letter-spacing: 0.04em; color: var(--ink-3); text-shadow: 0 2px 16px var(--night-0); }
+.result-share { pointer-events: auto; color: var(--sun-hi); text-decoration: none; }
+.result-share:hover { text-decoration: underline; }
 .result-state.pending { animation: result-pending 1.2s ease-in-out infinite; }
 @keyframes result-pending { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .result-state.pending { animation: none; } }
@@ -1000,7 +1002,8 @@ select.dash-input { padding-right: 28px; }
 
 .modal-kv { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .modal-kv span:first-child { color: var(--ink-3); }
-.modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+.modal-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.modal-actions .ghost-btn, .modal-actions .solid-btn { white-space: nowrap; }
 
 .form { display: flex; flex-direction: column; gap: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; }

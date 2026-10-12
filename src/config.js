@@ -44,7 +44,7 @@ export const API_CONFIG = {
 // Public facts of the Monad chains. The app runs on the one NEXT_PUBLIC_CHAIN_ID names (testnet by
 // default); any other id is a local chain and needs NEXT_PUBLIC_RPC_URL.
 const KNOWN_CHAINS = {
-  10143: { name: 'Monad Testnet', rpcUrl: 'https://testnet-rpc.monad.xyz', explorerUrl: 'https://testnet.monadexplorer.com' },
+  10143: { name: 'Monad Testnet', rpcUrl: 'https://testnet-rpc.monad.xyz', explorerUrl: 'https://testnet.monadexplorer.com', faucetUrl: 'https://faucet.monad.xyz' },
   143: { name: 'Monad Mainnet', rpcUrl: 'https://rpc.monad.xyz', explorerUrl: 'https://monadexplorer.com' }
 };
 const chainId = env.CHAIN_ID ? Number(env.CHAIN_ID) : 10143;
@@ -60,6 +60,7 @@ export const NETWORK_CONFIG = {
   // Push subscriptions (new blocks, contract logs) use the same endpoint over WebSocket
   wsUrl: rpcUrl ? rpcUrl.replace(/^http/, 'ws') : null,
   explorerUrl: env.EXPLORER_URL || known?.explorerUrl || null,
+  faucetUrl: known?.faucetUrl || null,
   contractAddress: env.CONTRACT_ADDRESS || null,
   nativeCurrency: {
     name: 'Monad',
