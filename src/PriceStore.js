@@ -21,6 +21,7 @@ export class PriceStore {
     this.bars1m = [];
     this.loadToken = 0;
     this.loading = false; // true while history for the current market is being fetched
+    this.loaded = false;  // true once an initial load has been attempted (success or failure)
   }
 
   reset() {
@@ -37,7 +38,7 @@ export class PriceStore {
     try {
       await this.loadFrom(market, token);
     } finally {
-      if (token === this.loadToken) this.loading = false;
+      if (token === this.loadToken) { this.loading = false; this.loaded = true; }
     }
   }
 

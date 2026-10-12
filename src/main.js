@@ -1012,12 +1012,14 @@ export function startApp() {
   // Market data
   // ---------------------------------------------------------------------------
   const amm = new MarketState({
-    tick: ({ market, isActiveMarket, price, allMarkets, vol }) => {
+    tick: ({ marketKey, market, isActiveMarket, price, allMarkets, vol }) => {
+      // Every market's chart keeps accumulating live ticks even while it isn't the one shown, so
+      // switching back to an already-visited market is instant instead of reloading its history.
+      engine.pushTick(marketKey, price, vol || 0);
       if (isActiveMarket) {
         // The chart draws only once history has loaded: keep the boot screen up until then, so a
         // refresh never shows the empty canvas between the loader and the first frame
         if (!engine.store.loading) bootStep('prices');
-        engine.pushTick(price, vol || 0);
         const now = performance.now();
         if (now - lastHeroPaint >= 80) {
           lastHeroPaint = now;
@@ -1050,8 +1052,10 @@ export function startApp() {
       });
       el.assetName.textContent = SUPPORTED_MARKETS[key]?.name || key;
       el.assetPair.textContent = market.symbol.replace('/', ' / ');
-      engine.reset(market.price, market.decimals);
-      engine.store.load(SUPPORTED_MARKETS[key]);
+      const store = engine.reset(key, market.price, market.decimals);
+      // A market visited before this session already has live history (see pushTick below); only ever
+      // fetch its REST history once, so switching back to it is instant instead of reloading.
+      if (!store.loaded && !store.loading) store.load(SUPPORTED_MARKETS[key]);
       engine.setStrike(null);
       engine.setUserBets([]);
       lastHeroPrice = null;
@@ -1509,6 +1513,13 @@ export function startApp() {
   web3.restoreSession();
   pulse.refresh();
   amm.emit('marketChanged', amm.getActiveMarket());
+  // Warm every other market's chart history in the background right away, instead of only starting
+  // that fetch (and showing the brief "Loading..." frame) the first time it's actually switched to.
+  for (const key of Object.keys(SUPPORTED_MARKETS)) {
+    if (key === amm.activeMarketKey || amm.markets[key]?.unavailable) continue;
+    const slot = engine.slotFor(key);
+    if (!slot.store.loaded && !slot.store.loading) slot.store.load(SUPPORTED_MARKETS[key]);
+  }
   renderLedger();
   updateSafeArea();
   engine.start();

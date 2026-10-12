@@ -32,6 +32,9 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 
 export class HorizonEngine {
+  // A market not viewed for this long has its live history dropped (see evictIdleSlots)
+  static IDLE_SLOT_MS = 10 * 60 * 1000;
+
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
@@ -61,6 +64,10 @@ export class HorizonEngine {
     this.pointer = { x: 0.5, y: 0.5 };
     this.chartMode = 'line';    // 'line' | 'candles'
     this.tf = 5;                // zoom: seconds per candle / per 10px
+    // Each market keeps its own ticks + PriceStore, updated live even while it isn't the one shown
+    // (see pushTick), so switching back to an already-visited market is instant instead of reloading.
+    this.marketSlots = new Map(); // key -> { store: PriceStore, ticks: [] }
+    this.activeKey = null;
     this.store = new PriceStore();
     this.pointerPx = null;
     this.parallax = { x: 0, y: 0 };
@@ -89,31 +96,63 @@ export class HorizonEngine {
   // Public API
   // ---------------------------------------------------------------------------
 
+  /** The market's slot (ticks + PriceStore), created empty on first visit and kept afterward */
+  slotFor(key) {
+    let slot = this.marketSlots.get(key);
+    if (!slot) {
+      slot = { store: new PriceStore(), ticks: [], lastActive: Date.now() };
+      this.marketSlots.set(key, slot);
+    }
+    return slot;
+  }
+
   /**
-   * Switch to a market. `price` is its last real price, or null if none has arrived yet. Nothing is
-   * drawn until there is a real price and the price history has finished loading (see render), so a
-   * refresh never shows a guessed price or an animated rescale.
+   * Drop a market's live history once it has sat unviewed for a while, instead of every market you
+   * ever glanced at staying warm in memory (and taking a share of every tick's work) for the rest of
+   * the session. The market on screen is never evicted; one coming back after being dropped just loads
+   * fresh, the same as the first time it was ever opened.
    */
-  reset(price, decimals = 2) {
+  evictIdleSlots(now = Date.now()) {
+    for (const [key, slot] of this.marketSlots) {
+      if (key !== this.activeKey && now - slot.lastActive > HorizonEngine.IDLE_SLOT_MS) this.marketSlots.delete(key);
+    }
+  }
+
+  /**
+   * Switch to a market. `price` is its last real price, or null if none has arrived yet. A market
+   * visited before in this session already has live history (pushTick keeps every market's slot
+   * updated even while it isn't shown) and switches instantly; a market seen for the first time draws
+   * nothing until its REST history has loaded (see render), so a switch never shows a guessed price or
+   * an animated rescale. Returns that market's PriceStore, so the caller knows whether to load it.
+   */
+  reset(key, price, decimals = 2) {
     this.decimals = decimals;
-    this.ticks = Number.isFinite(price) && price > 0 ? [{ t: Date.now(), p: price }] : [];
-    this.displayPrice = this.ticks.length ? price : null;
+    this.activeKey = key;
+    const slot = this.slotFor(key);
+    slot.lastActive = Date.now();
+    this.evictIdleSlots(slot.lastActive);
+    if (Number.isFinite(price) && price > 0 && !slot.ticks.length) slot.ticks.push({ t: Date.now(), p: price });
+    this.store = slot.store;
+    this.ticks = slot.ticks;
+    this.displayPrice = this.ticks.length ? this.ticks[this.ticks.length - 1].p : null;
     this.refit();
     this.flash = null;
     this.ready = false;
+    return slot.store;
   }
 
-  pushTick(price, vol = 0) {
+  pushTick(key, price, vol = 0) {
     if (!Number.isFinite(price) || price <= 0) return;
+    const slot = this.slotFor(key);
     const now = Date.now();
-    this.store.push(price, vol, now);
-    const last = this.ticks[this.ticks.length - 1];
+    slot.store.push(price, vol, now);
+    const last = slot.ticks[slot.ticks.length - 1];
     // Collapse bursts of ticks within 120ms into one point to keep the path light
     if (last && now - last.t < 120) last.p = price;
-    else this.ticks.push({ t: now, p: price });
+    else slot.ticks.push({ t: now, p: price });
     const cutoff = now - 240000;
-    while (this.ticks.length && this.ticks[0].t < cutoff) this.ticks.shift();
-    if (this.displayPrice === null) this.displayPrice = price;
+    while (slot.ticks.length && slot.ticks[0].t < cutoff) slot.ticks.shift();
+    if (key === this.activeKey && this.displayPrice === null) this.displayPrice = price;
   }
 
   setStrike(price) {
@@ -304,7 +343,21 @@ export class HorizonEngine {
     const ctx = this.ctx;
     const W = this.width;
     const H = this.height;
-    if (!W || !H || !this.ticks.length || this.store.loading) return;
+    if (!W || !H) return;
+    if (!this.ticks.length || this.store.loading) {
+      // A market switch loads fresh history before anything is drawn (see reset()'s comment: no
+      // guessed price, no animated rescale), but leaving the previous market's last frame on screen
+      // during that wait reads as the chart having frozen rather than as it loading. Blank it instead.
+      ctx.fillStyle = COLORS.night;
+      ctx.fillRect(0, 0, W, H);
+      if (this.store.loading) {
+        ctx.font = `600 12px ${FONT}`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = rgba(COLORS.ink, 0.35);
+        ctx.fillText('Loading…', W / 2, H / 2);
+      }
+      return;
+    }
     // First frame with real data: start exactly at the latest price and scale, no glide from elsewhere
     if (!this.ready) {
       this.ready = true;
