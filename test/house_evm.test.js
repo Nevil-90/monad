@@ -221,7 +221,10 @@ console.log('\n--- Owner cannot retime a pending bet ---');
   assert((await house.bets(b7.id)).status === S.Pending, "Shrinking voidAfter after the bet was placed does not void it early; it keeps its own 20 h");
   await (await house.setTimeouts(origGrace, origVoid, origLpLock)).wait();
   await warpTo(b7.endTs + Number(origVoid) + 1);
-  await (await house.connect(keeper).recordAndSettle([], [b7.id])).wait();
+  // Ganache's estimator occasionally undershoots the void path specifically (same margin-free-estimate
+  // flakiness documented on place() above); add the same kind of buffer rather than trust it blindly.
+  const voidEst = await house.connect(keeper).recordAndSettle.estimateGas([], [b7.id]);
+  await (await house.connect(keeper).recordAndSettle([], [b7.id], { gasLimit: voidEst + 200_000n })).wait();
   assert((await house.bets(b7.id)).status === S.Void, "It still voids at its own original 20 h timeout, not any value set after it was placed");
   await invariant('owner cannot retime a pending bet');
 }

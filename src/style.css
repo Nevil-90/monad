@@ -86,6 +86,12 @@ button:disabled { cursor: not-allowed; }
   html, body { overflow-x: hidden; overflow-y: auto; height: auto; }
   body { min-height: 780px; }
   #horizon, .ui { position: absolute; top: 0; left: 0; right: 0; bottom: auto; height: 780px; }
+  /* The Dashboard is a fixed, viewport-clipped overlay with its own internal scroll (.dashboard below).
+     On a short window the rules above let the *page* scroll too, so while the Dashboard is open a scroll
+     both moved its own list AND the page underneath, exposing the dimmed Trade view around/behind it.
+     Pin the page still whenever the Dashboard is open; .dashboard keeps scrolling internally. */
+  body.view-dashboard { overflow: hidden; height: 100%; }
+  html:has(body.view-dashboard) { overflow: hidden; height: 100%; }
 }
 .ui > * { pointer-events: auto; }
 
@@ -682,6 +688,7 @@ body.view-dashboard .topbar { background: rgba(6, 5, 11, 0.94); }
   z-index: 5;
   background: linear-gradient(180deg, rgba(6, 5, 11, 0.94), rgba(6, 5, 11, 0.86));
   overflow-y: auto;
+  overscroll-behavior: contain; /* a scroll that hits the top/bottom of this list must not fall through to the page */
   padding: 8px var(--gutter) 48px;
 }
 .dash-inner { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }

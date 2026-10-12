@@ -1,5 +1,5 @@
 {
-  "name": "monad-updown-amm",
+  "name": "pulse",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -26,7 +26,6 @@
   },
   "devDependencies": {
     "ganache": "^7.9.2",
-    "playwright": "^1.64.0",
     "solc": "^0.8.24"
   },
   "dependencies": {

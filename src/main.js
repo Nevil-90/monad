@@ -1465,6 +1465,11 @@ export function startApp() {
     });
     if (dash) setLedger(false);
     dashboard.show(dash);
+    // The horizon canvas sits behind the Dashboard's blurred glass cards, dimmed but still redrawing
+    // every frame; on some GPUs a backdrop-filter blur sampling a layer that keeps repainting under it
+    // renders solid black instead of a blur, especially on a wide/large viewport. It's hidden either
+    // way, so stop it while the Dashboard is open and resume it on the way back to Trade.
+    if (dash) engine.stop(); else engine.start();
     requestAnimationFrame(updateSafeArea);
   }
   document.querySelectorAll('.view-btn').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));

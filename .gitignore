@@ -16,6 +16,11 @@ wallet.json
 checklist.md
 archive/
 
+# Local only: internal working notes, not for the public submission
+HACKATHON_IDEAS.md
+CONTEXT.md
+question.md
+
 # OS / editor noise
 .DS_Store
 *.log

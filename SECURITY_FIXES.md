@@ -22,16 +22,24 @@ Tracks every security finding for `MonadUpDownAMM`: what was wrong, what changed
 
 ## How to verify
 
+Today, against `MonadPulseHouse` (the live contract):
+
 ```bash
-npm run test:all        # compile + app logic + EVM integration + security regressions
+npm run test:all        # compile + app logic + house contract (151 checks, includes SEC-30's solvency invariant)
+npm run test:security   # reentrancy guard, exercised with a real attacker contract
+```
+
+The commands below are historical: they belonged to `MonadUpDownAMM`'s own test suite
+(`test/security_regressions.test.js`, `scripts/mutation_check.js`, `test/invariant_fuzz.test.js`, and two
+testnet-only scripts), all removed with that contract. Kept here only so the findings below stay legible
+— do not try to run them against this repository as it stands today.
+
+```bash
 npm run test:mutation   # re-injects each fixed bug and confirms the regression suite catches it
 npm run test:fuzz       # randomized stateful test: solvency, exact payouts, no refund-then-settle (SEC-17)
 npm run test:wallets    # testnet: 5 real wallets play 3 markets, payouts checked to the wei (needs the keeper)
 npm run test:challenge  # testnet: a dishonest late report is replaced by the keeper (SEC-28; keeper must be stopped)
 ```
-
-- `test/security_regressions.test.js` prints one `[PASS]/[FAIL] [SEC-xx]` line per check. **Any `[FAIL] [SEC-xx]` means that bug has come back.** Set its status to `Regressed` below and add a history entry.
-- `scripts/mutation_check.js` re-introduces the original bug for each covered finding. If it prints `[MISSED]`, the regression test for that finding has become too weak and must be strengthened.
 
 ## Status legend
 

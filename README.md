@@ -73,7 +73,7 @@ second, and the price is the median of their values. The chart streams Coinbase'
 |---|---|---|
 | Contract | `contracts/MonadPulseHouse.sol`, `contracts/SignedPriceOracle.sol` | Bets, vault, prices, settlement, streak jackpot |
 | App | `src/app`, `src/components`, `src/*.js` | Next.js app: canvas chart, bet panel, jackpot board, Dashboard |
-| Relay | `scripts/price_relay.js` | Indexes contract events (Monad WebSocket), pushes them with block height and gas price to browsers (SSE); serves signed reports by timestamp |
+| Relay | `scripts/price_relay.js` | Indexes contract events (Monad WebSocket), pushes them with block height and gas price to browsers (SSE); serves signed reports by timestamp and the Dashboard's paginated queries, both backed by Supabase (`supabase/schema.sql`) |
 | Keeper | `scripts/house_keeper.js` | Event-driven: records the strike and result prices of pending bets and settles them |
 | Ops | `deploy/`, `scripts/retire_contract.js`, `scripts/transfer_owner.js` | Docker image and compose file for relay + keeper; pause an old deployment; hand ownership to a Safe |
 | Local chain | `scripts/dev_house_chain.js` | Ganache with the house deployed, simulated players and a local settler |
@@ -89,6 +89,12 @@ cp .env.example .env            # then fill it in (see "Deploy")
 
 npm run dev:testnet             # relay + keeper + app on http://localhost:3000; Ctrl+C stops all
 ```
+
+The relay needs a Supabase project before it will start: create one at
+[supabase.com/dashboard](https://supabase.com/dashboard), run `supabase/schema.sql` once in its SQL
+editor, and put its URL and service-role key in `.env` (`SUPABASE_URL`, `SUPABASE_SERVICE_KEY` — see the
+comments in `.env.example`). It's the relay's event index and the Dashboard's data source; the app never
+talks to it directly and it never affects bet placement or settlement, both of which stay fully on-chain.
 
 Every bet is a real transaction on the network in `.env` (Monad testnet today). Without a wallet you can
 watch prices, the jackpot and the Dashboard; connect a wallet with testnet MON to bet.
