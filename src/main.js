@@ -346,7 +346,22 @@ export function startApp() {
   // ---------------------------------------------------------------------------
   // Modals & drawer
   // ---------------------------------------------------------------------------
-  function openModal(id) { $(id).classList.remove('hidden'); }
+  // The horizon canvas sits behind the ledger drawer, any modal and the Dashboard, all of which blur a
+  // large area directly over it; a backdrop-filter blur sampling a layer that keeps redrawing under it
+  // can leave the GPU compositor stuck (showing stale/black pixels, or just never repainting) on some
+  // browsers/GPUs — the same class of bug already worked around for the small .modal-card (see its CSS
+  // comment). The canvas is fully occluded in all three cases anyway, so stop it while any of them is
+  // open and resume once none are, instead of trusting the blur to behave.
+  function overlayOpen() {
+    return el.ledger.classList.contains('open')
+      || document.body.classList.contains('view-dashboard')
+      || Array.from(document.querySelectorAll('.modal')).some((m) => !m.classList.contains('hidden'));
+  }
+  function syncEngineRunning() {
+    if (overlayOpen()) engine.stop(); else engine.start();
+  }
+
+  function openModal(id) { $(id).classList.remove('hidden'); syncEngineRunning(); }
 
   // How it works: shown once on the first visit, reopened from the ? button or the ? key
   function openGuide() {
@@ -355,7 +370,7 @@ export function startApp() {
     try { localStorage.setItem('mp.seenGuide', '1'); } catch (_) { /* storage unavailable */ }
   }
   $('help-btn').addEventListener('click', openGuide);
-  function closeModal(id) { $(id).classList.add('hidden'); }
+  function closeModal(id) { $(id).classList.add('hidden'); syncEngineRunning(); }
 
   document.addEventListener('click', (e) => {
     const closer = e.target.closest('[data-close]');
@@ -368,6 +383,7 @@ export function startApp() {
     el.ledger.setAttribute('aria-hidden', String(!open));
     el.ledgerBtn.setAttribute('aria-expanded', String(open));
     el.scrim.classList.toggle('hidden', !open);
+    syncEngineRunning();
   }
   el.ledgerBtn.addEventListener('click', () => setLedger(!el.ledger.classList.contains('open')));
   $('ledger-close').addEventListener('click', () => setLedger(false));
@@ -1229,6 +1245,7 @@ export function startApp() {
     if (e.key === 'Escape') {
       setLedger(false);
       document.querySelectorAll('.modal').forEach((m) => m.classList.add('hidden'));
+      syncEngineRunning();
       return;
     }
     const keyMap = { 1: 'BTC', 2: 'ETH', 3: 'SOL', 4: 'MON' };
@@ -1465,11 +1482,7 @@ export function startApp() {
     });
     if (dash) setLedger(false);
     dashboard.show(dash);
-    // The horizon canvas sits behind the Dashboard's blurred glass cards, dimmed but still redrawing
-    // every frame; on some GPUs a backdrop-filter blur sampling a layer that keeps repainting under it
-    // renders solid black instead of a blur, especially on a wide/large viewport. It's hidden either
-    // way, so stop it while the Dashboard is open and resume it on the way back to Trade.
-    if (dash) engine.stop(); else engine.start();
+    syncEngineRunning();
     requestAnimationFrame(updateSafeArea);
   }
   document.querySelectorAll('.view-btn').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
